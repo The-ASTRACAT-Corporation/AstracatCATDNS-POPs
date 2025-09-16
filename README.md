@@ -42,28 +42,6 @@ sudo ./install.sh
 3.  Создаст и настроит службу `systemd` для `astracat-dns`.
 4.  Запустит DNS-сервер `astracat-dns` как системную службу.
 
-## 📖 Документация
-
-```Go
-import "github.com/peterzen/goresolver"
-
-result, err := resolver.StrictNSQuery("example.com.", dns.TypeMX)
-
-if err != nil {
-    // handle validation errors
-}
-```
-`goresolver.LookupIP` можно использовать как замену [net.LookupIP](https://golang.org/pkg/net/#LookupIP):
-
-```Go
-import "github.com/peterzen/goresolver"
-
-ips, err := goresolver.LookupIP("www.example.com")
-
-if err != nil {
-    // handle validation errors
-}
-```
 
 ## 🤝 Вклад
 
