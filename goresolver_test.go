@@ -2,6 +2,8 @@ package goresolver
 
 import (
 	"testing"
+
+	"github.com/miekg/dns"
 )
 
 func TestSetClientConfig(t *testing.T) {
@@ -12,7 +14,7 @@ func TestSetClientConfig(t *testing.T) {
 }
 
 func TestDnsMessageInit(t *testing.T) {
-	msg := NewDNSMessage()
+	msg := NewDNSMessage("example.com", dns.TypeA)
 	opt := msg.IsEdns0()
 	if opt.Do() != true {
 		t.Logf("DO bit not enabled")
