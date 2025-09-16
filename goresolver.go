@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/domainr/dnsr"
 )
 
 var (
@@ -28,6 +29,7 @@ type Resolver struct {
 	dnsClientConfig *dns.ClientConfig
 	queryFn         queryFunc
 	Cache           *DNSCache
+	dnsrResolver    *dnsr.Resolver // Add dnsr.Resolver
 }
 
 type queryFunc func(name string, qtype uint16) (*dns.Msg, error)
@@ -188,6 +190,17 @@ func queryDelegation(domainName string) (signedZone *SignedZone, err error) {
 	return signedZone, nil
 }
 
+// RecursiveQuery performs a recursive DNS query using the dnsr library.
+func (r *Resolver) RecursiveQuery(name string, qtype string) ([]*dnsr.RR, error) {
+	rrs := r.dnsrResolver.Resolve(name, qtype)
+	var result []*dnsr.RR
+	for _, rr := range rrs {
+		rrCopy := rr // Create a copy to take address of
+		result = append(result, &rrCopy)
+	}
+	return result, nil
+}
+
 // NewResolver initializes the package Resolver instance using the default
 // dnsClientConfig.
 func NewResolver(resolvConf string) (res *Resolver, err error) {
@@ -201,5 +214,6 @@ func NewResolver(resolvConf string) (res *Resolver, err error) {
 	}
 	CurrentResolver.queryFn = localQuery
 	CurrentResolver.Cache = NewDNSCache(16) // Initialize cache with 16 shards
+	CurrentResolver.dnsrResolver = dnsr.NewResolver() // Initialize dnsr.Resolver without cache
 	return CurrentResolver, nil
 }
