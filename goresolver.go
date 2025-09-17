@@ -99,7 +99,6 @@ func (r *Resolver) Query(name string, qtype uint16) (*dns.Msg, error) {
 
 	// Separate answer and authority records
 	var answerRRs []dns.RR
-	var authorityRRs []dns.RR
 	var rrsigRRs []dns.RR
 	var dnskeyRRs []dns.RR
 	var dsRRs []dns.RR
