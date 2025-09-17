@@ -84,7 +84,7 @@ func (s SecurityStatus) String() string {
 type Resolver struct {
 	dnsClient    *dns.Client
 	rootServers  []string
-	trustAnchors map[string][]*dns.DNSKEY // Доверенные привязки (Trust Anchors)
+	trustAnchors map[string][]*dns.DS // Храним DS записи как trust anchors
 }
 
 // DNSResult представляет результат DNS-запроса.
@@ -525,17 +525,29 @@ func (r *Resolver) verifyDS(ds *dns.DS, dnskey *dns.DNSKEY) error {
 	var hash []byte
 	switch ds.DigestType {
 	case dns.SHA1:
-		h := sha1.Sum(dnskey.ToDS(ds.DigestType).Digest)
+		// Конвертируем string в []byte
+		digestBytes := []byte(ds.Digest)
+		h := sha1.Sum(digestBytes)
 		hash = h[:]
 	case dns.SHA256:
-		h := sha256.Sum256(dnskey.ToDS(ds.DigestType).Digest)
+		// Конвертируем string в []byte
+		digestBytes := []byte(ds.Digest)
+		h := sha256.Sum256(digestBytes)
 		hash = h[:]
 	default:
 		return fmt.Errorf("неподдерживаемый тип хэша DS: %d", ds.DigestType)
 	}
 	
 	// Сравниваем хэши
-	if string(hash) != string(ds.Digest) {
+	// ds.Digest уже является строкой хэша, полученного от сервера
+	// Мы должны вычислить хэш DNSKEY и сравнить его с ds.Digest
+	// Для этого используем dnskey.ToDS()
+	computedDS := dnskey.ToDS(ds.DigestType)
+	if computedDS == nil {
+		return fmt.Errorf("не удалось вычислить DS для DNSKEY")
+	}
+	
+	if computedDS.Digest != ds.Digest {
 		log.Printf("Хэш DS не совпадает с хэшем DNSKEY")
 		return ErrDSVerificationFailed
 	}
@@ -561,10 +573,10 @@ func NewResolver(resolvConf string) (res *Resolver, err error) {
 	resolver.rootServers = parseRootHints(RootHints)
 	
 	// Инициализируем доверенные привязки (trust anchors)
-	resolver.trustAnchors = make(map[string][]*dns.DNSKEY)
+	resolver.trustAnchors = make(map[string][]*dns.DS)
 	
 	// Парсим корневой доверенный ключ
-	if err := r.parseTrustAnchors(RootTrustAnchor); err != nil {
+	if err := resolver.parseTrustAnchors(RootTrustAnchor); err != nil {
 		return nil, fmt.Errorf("ошибка парсинга trust anchor: %v", err)
 	}
 	
@@ -583,11 +595,8 @@ func (r *Resolver) parseTrustAnchors(anchorStr string) error {
 	if ds, ok := rr.(*dns.DS); ok {
 		// DS запись добавляется как trust anchor для зоны
 		zone := strings.ToLower(ds.Header().Name)
-		// Для простоты, мы будем хранить DS в trustAnchors, хотя это не совсем правильно
-		// В реальной реализации нужно хранить DNSKEY, а DS использовать для проверки перехода между зонами
+		r.trustAnchors[zone] = append(r.trustAnchors[zone], ds)
 		log.Printf("Добавлен trust anchor (DS) для зоны %s", zone)
-		// Здесь нужно реализовать более сложную логику для хранения и использования trust anchors
-		// Пока просто отметим, что это нужно сделать
 	}
 	
 	return nil
