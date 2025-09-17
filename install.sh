@@ -3,7 +3,7 @@
 # Exit immediately if a command exits with a non-zero status.
 set -e
 
-PROJECT_DIR="/Users/astracat/Astracat-DNS-Resolver-1"
+PROJECT_DIR="/root/Astracat-DNS-Resolver"
 SERVICE_NAME="astracat-dns"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
