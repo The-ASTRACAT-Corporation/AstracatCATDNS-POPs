@@ -18,8 +18,8 @@ Description=Astracat DNS Resolver Service
 After=network.target
 
 [Service]
-ExecStart=''' + "${PROJECT_DIR}" + '''/${SERVICE_NAME}"
-WorkingDirectory=''' + "${PROJECT_DIR}" + '''
+ExecStart="${PROJECT_DIR}/${SERVICE_NAME}"
+WorkingDirectory="${PROJECT_DIR}"
 Restart=always
 User=root
 
