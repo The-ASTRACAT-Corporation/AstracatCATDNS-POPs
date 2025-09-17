@@ -1,30 +1,35 @@
 #!/bin/bash
 
+# Exit immediately if a command exits with a non-zero status.
 set -e
 
-echo "Building astracat-dns server..."
-go build -o dnsserver cmd/dnsserver/dnsserver.go
+PROJECT_DIR="/Users/astracat/Astracat-DNS-Resolver-1"
+SERVICE_NAME="astracat-dns"
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
-echo "Installing astracat-dns to /usr/local/bin..."
-sudo mv dnsserver /usr/local/bin/astracat-dns
+echo "Building the project..."
+cd "$PROJECT_DIR"
+go build -o "${SERVICE_NAME}" .
 
 echo "Creating systemd service file..."
-sudo tee /etc/systemd/system/astracat-dns.service > /dev/null <<EOF
+cat <<EOF > "${SERVICE_FILE}"
 [Unit]
-Description=Astracat DNS Server
+Description=Astracat DNS Resolver Service
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/astracat-dns
-Restart=on-failure
+ExecStart="$PROJECT_DIR/${SERVICE_NAME}"
+WorkingDirectory="$PROJECT_DIR"
+Restart=always
+User=root
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-echo "Enabling and starting astracat-dns service..."
-sudo systemctl daemon-reload
-sudo systemctl enable astracat-dns
-sudo systemctl start astracat-dns
+echo "Enabling and starting the ${SERVICE_NAME} service..."
+systemctl daemon-reload
+systemctl enable "${SERVICE_NAME}"
+systemctl start "${SERVICE_NAME}"
 
-echo "Astracat DNS server installed and started successfully!"
+echo "Installation complete. The ${SERVICE_NAME} service is now running."
