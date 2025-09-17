@@ -1,9 +1,6 @@
 package goresolver
 
 import (
-	"crypto/sha1"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -16,25 +13,11 @@ import (
 
 var (
 	ErrNoData                = errors.New("no data for this record")
-	ErrResourceNotSigned     = errors.New("resource is not signed with RRSIG")
 	ErrNoResult              = errors.New("requested RR not found")
 	ErrNsNotAvailable        = errors.New("no name server to answer the question")
-	ErrDnskeyNotAvailable    = errors.New("DNSKEY RR does not exist")
-	ErrDsNotAvailable        = errors.New("DS RR does not exist")
-	ErrInvalidRRsig          = errors.New("invalid RRSIG")
-	ErrForgedRRsig           = errors.New("forged RRSIG header")
-	ErrRrsigValidationError  = errors.New("RR doesn't validate against RRSIG")
-	ErrRrsigValidityPeriod   = errors.New("invalid RRSIG validity period")
-	ErrUnknownDsDigestType   = errors.New("unknown DS digest type")
-	ErrDsInvalid             = errors.New("DS RR does not match DNSKEY")
 	ErrInvalidQuery          = errors.New("invalid query input")
 	ErrDNSSECValidationFailed = errors.New("DNSSEC validation failed")
-	ErrNoRRSIG               = errors.New("no RRSIG record found")
-	ErrNoDNSKEY              = errors.New("no DNSKEY record found")
 	ErrNoTrustAnchor         = errors.New("no trust anchor found")
-	ErrDNSKEYVerificationFailed = errors.New("DNSKEY verification failed")
-	ErrDSVerificationFailed  = errors.New("DS verification failed")
-	ErrInvalidDomainName     = errors.New("invalid domain name")
 	ErrMaxIterations         = errors.New("maximum iterations exceeded")
 )
 
@@ -96,14 +79,6 @@ func (r *Resolver) Query(name string, qtype uint16) (*dns.Msg, error) {
 		return nil, err
 	}
 
-	// Validate the final result
-	if result.Msg != nil && result.Msg.MsgHdr.AuthenticatedData {
-		err = r.validateDNSSECForMessage(result.Msg, name)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrDNSSECValidationFailed, err)
-		}
-	}
-
 	return result.Msg, result.Err
 }
 
@@ -115,10 +90,6 @@ func (r *Resolver) iterativeResolve(name string, qtype uint16, dnssec bool) (*DN
 	// Current domain to resolve - start with the full query name
 	currentDomain := dns.Fqdn(name)
 	
-	// Keep track of the best NS records found so far
-	var bestNS []*dns.NS
-	var bestGlue []dns.RR
-	
 	// Limit iterations to prevent infinite loops
 	maxIterations := 20
 	iterations := 0
@@ -127,15 +98,14 @@ func (r *Resolver) iterativeResolve(name string, qtype uint16, dnssec bool) (*DN
 	
 	for iterations < maxIterations {
 		iterations++
-		log.Printf("Iteration %d: Current domain: %s, Current servers: %v", iterations, currentDomain, currentServers)
+		log.Printf("Iteration %d: Current domain: %s", iterations, currentDomain)
 		
 		// Query current servers for the target
 		result := r.queryAuthoritativeServers(currentServers, currentDomain, qtype, dnssec)
 		
-		// If we got a direct answer, return it
+		// If we got a direct answer for our target, return it
 		if result.Msg != nil && (result.Msg.Rcode == dns.RcodeSuccess || result.Msg.Rcode == dns.RcodeNameError) {
-			// Check if this is the final answer for our query
-			if currentDomain == dns.Fqdn(name) || dns.IsSubDomain(currentDomain, dns.Fqdn(name)) {
+			if isFinalAnswer(currentDomain, name) {
 				log.Printf("Got final answer at iteration %d", iterations)
 				return result, nil
 			}
@@ -165,8 +135,6 @@ func (r *Resolver) iterativeResolve(name string, qtype uint16, dnssec bool) (*DN
 			// If we found NS records, update our server list
 			if len(nsRecords) > 0 {
 				log.Printf("Found NS records for %s: %d records", currentDomain, len(nsRecords))
-				bestNS = nsRecords
-				bestGlue = glueRecords
 				
 				// Get IP addresses for NS servers
 				var newServers []string
@@ -191,7 +159,7 @@ func (r *Resolver) iterativeResolve(name string, qtype uint16, dnssec bool) (*DN
 					// If no glue, we need to resolve the NS name
 					if !foundGlue {
 						log.Printf("No glue record for NS %s, resolving iteratively", ns.Ns)
-						nsResult, err := r.iterativeResolve(ns.Ns, dns.TypeA, dnssec)
+						nsResult, err := r.iterativeResolve(trimDot(ns.Ns), dns.TypeA, dnssec)
 						if err == nil && nsResult.Msg != nil && nsResult.Msg.Rcode == dns.RcodeSuccess {
 							for _, rr := range nsResult.Msg.Answer {
 								if a, ok := rr.(*dns.A); ok {
@@ -214,79 +182,31 @@ func (r *Resolver) iterativeResolve(name string, qtype uint16, dnssec bool) (*DN
 					log.Printf("No servers found from NS records, using previous servers")
 				}
 				
-				// Move to the parent domain for next iteration
-				labels := dns.Split(currentDomain)
-				if len(labels) > 1 {
-					// Remove the leftmost label
-					currentDomain = currentDomain[labels[0]:]
-					if currentDomain == "" {
-						currentDomain = "."
-					}
+				// Move to the next level down (closer to our target)
+				nextDomain := getNextDomain(currentDomain, name)
+				if nextDomain != currentDomain {
+					currentDomain = nextDomain
+					log.Printf("Moving to next domain: %s", currentDomain)
+					continue
 				} else {
-					currentDomain = "."
+					// We can't go further down, try to get the actual record now
+					finalResult := r.queryAuthoritativeServers(currentServers, name, qtype, dnssec)
+					return finalResult, finalResult.Err
 				}
-				
-				log.Printf("Moving to parent domain: %s", currentDomain)
-				continue
 			}
 		}
 		
-		// If we get here and couldn't make progress, try to find a better delegation
-		if len(bestNS) > 0 {
-			log.Printf("Trying to use best NS records found so far")
-			var newServers []string
-			for _, ns := range bestNS {
-				// Check glue records
-				foundGlue := false
-				for _, glue := range bestGlue {
-					if dns.Fqdn(glue.Header().Name) == dns.Fqdn(ns.Ns) {
-						if a, ok := glue.(*dns.A); ok {
-							newServers = append(newServers, a.A.String())
-							foundGlue = true
-						} else if aaaa, ok := glue.(*dns.AAAA); ok {
-							newServers = append(newServers, aaaa.AAAA.String())
-							foundGlue = true
-						}
-					}
-				}
-				
-				// If no glue, resolve NS name (simplified)
-				if !foundGlue {
-					log.Printf("Resolving NS name without glue: %s", ns.Ns)
-					nsResult, err := r.iterativeResolve(ns.Ns, dns.TypeA, dnssec)
-					if err == nil && nsResult.Msg != nil && nsResult.Msg.Rcode == dns.RcodeSuccess {
-						for _, rr := range nsResult.Msg.Answer {
-							if a, ok := rr.(*dns.A); ok {
-								newServers = append(newServers, a.A.String())
-							} else if aaaa, ok := rr.(*dns.AAAA); ok {
-								newServers = append(newServers, aaaa.AAAA.String())
-							}
-						}
-					}
-				}
-			}
-			
-			if len(newServers) > 0 {
-				currentServers = newServers
-			}
-			
-			// Move to parent domain
-			labels := dns.Split(currentDomain)
-			if len(labels) > 1 {
-				currentDomain = currentDomain[labels[0]:]
-				if currentDomain == "" {
-					currentDomain = "."
-				}
-			} else {
-				currentDomain = "."
-			}
-			
+		// If we get here, try to get closer to the target domain
+		nextDomain := getNextDomain(currentDomain, name)
+		if nextDomain != currentDomain {
+			currentDomain = nextDomain
+			log.Printf("Moving to next domain: %s", currentDomain)
 			continue
+		} else {
+			// Try final query
+			finalResult := r.queryAuthoritativeServers(currentServers, name, qtype, dnssec)
+			return finalResult, finalResult.Err
 		}
-		
-		// If we get here, we couldn't make progress
-		log.Printf("Could not make progress in iteration %d, returning error", iterations)
-		break
 	}
 	
 	return &DNSResult{Msg: nil, Err: ErrMaxIterations}, nil
@@ -308,7 +228,7 @@ func (r *Resolver) queryAuthoritativeServers(servers []string, name string, qtyp
 			log.Printf("Got response from %s, Rcode: %s", addr, dns.RcodeToString[response.Rcode])
 			result.Msg = response
 			
-			// Collect NS and glue records from the response
+			// Collect NS records from the response
 			for _, rr := range response.Ns {
 				if ns, ok := rr.(*dns.NS); ok {
 					result.AuthNS = append(result.AuthNS, ns)
@@ -331,123 +251,52 @@ func (r *Resolver) queryAuthoritativeServers(servers []string, name string, qtyp
 	return result
 }
 
-// validateDNSSECForMessage validates DNSSEC for a complete DNS message
-func (r *Resolver) validateDNSSECForMessage(msg *dns.Msg, qname string) error {
-	// This is a simplified validation - a full implementation would be much more complex
-	// We would need to validate the chain of trust from the root down to the answer
+// isFinalAnswer checks if we've reached the final answer for our query
+func isFinalAnswer(currentDomain, targetDomain string) bool {
+	return dns.Fqdn(targetDomain) == currentDomain || dns.IsSubDomain(currentDomain, dns.Fqdn(targetDomain))
+}
+
+// getNextDomain gets the next domain closer to the target
+func getNextDomain(currentDomain, targetDomain string) string {
+	current := dns.Fqdn(currentDomain)
+	target := dns.Fqdn(targetDomain)
 	
-	// Check if we have RRSIGs
-	hasRRSIG := false
-	for _, rr := range msg.Answer {
-		if _, ok := rr.(*dns.RRSIG); ok {
-			hasRRSIG = true
-			break
+	// If current is root, move to the top level of target
+	if current == "." {
+		labels := dns.Split(target)
+		if len(labels) > 0 {
+			return target[labels[len(labels)-1]:]
 		}
+		return target
 	}
 	
-	for _, rr := range msg.Ns {
-		if _, ok := rr.(*dns.RRSIG); ok {
-			hasRRSIG = true
-			break
-		}
-	}
-	
-	if !hasRRSIG && msg.Rcode == dns.RcodeSuccess && len(msg.Answer) > 0 {
-		// Check for NSEC/NSEC3 in negative responses or nodata responses
-		hasNSEC := false
-		for _, rr := range msg.Ns {
-			if _, ok := rr.(*dns.NSEC); ok {
-				hasNSEC = true
-				break
-			}
-			if _, ok := rr.(*dns.NSEC3); ok {
-				hasNSEC = true
-				break
-			}
-		}
+	// If target is a subdomain of current, move one level down
+	if dns.IsSubDomain(current, target) && target != current {
+		// Find the next label to add
+		currentLabels := dns.Split(current)
+		targetLabels := dns.Split(target)
 		
-		if !hasNSEC {
-			log.Printf("Warning: No RRSIG records found for %s, but expecting DNSSEC", qname)
+		if len(targetLabels) > len(currentLabels) {
+			// Move one label closer
+			start := targetLabels[len(targetLabels)-len(currentLabels)-1]
+			return target[start:]
 		}
 	}
 	
-	// In a real implementation, we would:
-	// 1. Start from the trust anchor (root DNSKEY)
-	// 2. Validate the chain of trust down to the answer
-	// 3. Validate all RRSIGs in the response
-	// 4. Handle NSEC/NSEC3 for negative responses
-	
-	return nil
+	// Otherwise, move up to parent
+	labels := dns.Split(current)
+	if len(labels) > 1 {
+		return current[labels[0]:]
+	}
+	return "."
 }
 
-// validateRRSIG validates an RRSIG record against a DNSKEY
-func (r *Resolver) validateRRSIG(rrset []dns.RR, rrsig *dns.RRSIG, dnskey *dns.DNSKEY) error {
-	// Check validity period
-	now := time.Now().Unix()
-	if now < int64(rrsig.Inception) || now > int64(rrsig.Expiration) {
-		return ErrRrsigValidityPeriod
+// trimDot removes the trailing dot from a domain name
+func trimDot(name string) string {
+	if len(name) > 0 && name[len(name)-1] == '.' {
+		return name[:len(name)-1]
 	}
-
-	// Verify the signature
-	err := rrsig.Verify(dnskey, rrset)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrRrsigValidationError, err)
-	}
-
-	return nil
-}
-
-// getRootDNSKEY returns the DNSKEY for the root zone (trust anchor)
-func (r *Resolver) getRootDNSKEY() ([]*dns.DNSKEY, error) {
-	// In a real implementation, this would be a configured trust anchor
-	// For now, we'll return an empty slice to indicate it needs to be configured
-	if keys, ok := r.trustAnchors["."]; ok {
-		return keys, nil
-	}
-	
-	return nil, ErrNoTrustAnchor
-}
-
-// validateWithTrustAnchor validates a DNSKEY against a trust anchor
-func (r *Resolver) validateWithTrustAnchor(dnskey *dns.DNSKEY, zone string) error {
-	// For root zone, check against trust anchor
-	if zone == "." {
-		trustAnchors, err := r.getRootDNSKEY()
-		if err != nil {
-			return err
-		}
-		
-		for _, ta := range trustAnchors {
-			if dnskey.Algorithm == ta.Algorithm && dnskey.Protocol == ta.Protocol {
-				if dnskey.PublicKey == ta.PublicKey {
-					return nil
-				}
-			}
-		}
-		
-		return ErrDNSKEYVerificationFailed
-	}
-	
-	// For other zones, we would need to validate against DS from parent zone
-	// This requires a much more complex implementation
-	return nil
-}
-
-// verifyDS verifies a DS record against a DNSKEY
-func (r *Resolver) verifyDS(ds *dns.DS, dnskey *dns.DNSKEY) error {
-	// Create a DS from the DNSKEY
-	calculatedDS := dnskey.ToDS(ds.DigestType)
-	
-	// Compare digest
-	if calculatedDS == nil {
-		return ErrUnknownDsDigestType
-	}
-	
-	if strings.ToUpper(calculatedDS.Digest) != strings.ToUpper(ds.Digest) {
-		return ErrDSVerificationFailed
-	}
-	
-	return nil
+	return name
 }
 
 // NewResolver initializes the package Resolver instance
@@ -527,9 +376,4 @@ func (r *Resolver) ResolveCNAME(name string) (*dns.Msg, error) {
 // ResolvePTR resolves PTR records
 func (r *Resolver) ResolvePTR(name string) (*dns.Msg, error) {
 	return r.Query(name, dns.TypePTR)
-}
-
-// IsDNSSECValid checks if a DNS response has valid DNSSEC signatures
-func (r *Resolver) IsDNSSECValid(msg *dns.Msg) bool {
-	return msg.MsgHdr.AuthenticatedData
 }
