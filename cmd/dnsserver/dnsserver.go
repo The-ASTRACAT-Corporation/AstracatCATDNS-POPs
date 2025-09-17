@@ -521,32 +521,13 @@ func (r *Resolver) verifyRRSIG(rrsig *dns.RRSIG, rrset []dns.RR, keys []*dns.DNS
 func (r *Resolver) verifyDS(ds *dns.DS, dnskey *dns.DNSKEY) error {
 	log.Printf("Проверка DS записи для DNSKEY (KeyTag: %d, Algorithm: %d)", dnskey.KeyTag(), dnskey.Algorithm)
 	
-	// Вычисляем хэш DNSKEY
-	var hash []byte
-	switch ds.DigestType {
-	case dns.SHA1:
-		// Конвертируем string в []byte
-		digestBytes := []byte(ds.Digest)
-		h := sha1.Sum(digestBytes)
-		hash = h[:]
-	case dns.SHA256:
-		// Конвертируем string в []byte
-		digestBytes := []byte(ds.Digest)
-		h := sha256.Sum256(digestBytes)
-		hash = h[:]
-	default:
-		return fmt.Errorf("неподдерживаемый тип хэша DS: %d", ds.DigestType)
-	}
-	
-	// Сравниваем хэши
-	// ds.Digest уже является строкой хэша, полученного от сервера
-	// Мы должны вычислить хэш DNSKEY и сравнить его с ds.Digest
-	// Для этого используем dnskey.ToDS()
+	// Вычисляем DS из DNSKEY
 	computedDS := dnskey.ToDS(ds.DigestType)
 	if computedDS == nil {
 		return fmt.Errorf("не удалось вычислить DS для DNSKEY")
 	}
 	
+	// Сравниваем хэши
 	if computedDS.Digest != ds.Digest {
 		log.Printf("Хэш DS не совпадает с хэшем DNSKEY")
 		return ErrDSVerificationFailed
