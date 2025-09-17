@@ -3,8 +3,6 @@
 package goresolver
 
 import (
-	"crypto/sha1"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log"
