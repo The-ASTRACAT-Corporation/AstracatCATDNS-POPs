@@ -14,6 +14,7 @@ import (
 // https://www.ietf.org/rfc/rfc4033.txt
 type AuthenticationChain struct {
 	delegationChain []SignedZone
+	resolver        *Resolver // Add resolver to the struct
 }
 
 // Populate queries the RRs required for the zone validation
@@ -32,14 +33,24 @@ func (authChain *AuthenticationChain) Populate(domainName string) error {
 	authChain.delegationChain = make([]SignedZone, 0, zonesToVerify)
 	for i := 0; i < zonesToVerify; i++ {
 		zoneName := dns.Fqdn(strings.Join(qnameComponents[i:], "."))
-		delegation, err := queryDelegation(zoneName)
+		// Query DNSKEYs for the current zone
+		delegationKeys, err := authChain.resolver.QueryDelegation(zoneName, nil, true)
 		if err != nil {
 			return err
 		}
-		if i > 0 {
-			authChain.delegationChain[i-1].parentZone = delegation
+
+		// Create a SignedZone from the delegationKeys
+		currentSignedZone := NewSignedZone(zoneName)
+		currentSignedZone.dnskey = &RRSet{rrSet: make([]dns.RR, len(delegationKeys))}
+		for i, key := range delegationKeys {
+			currentSignedZone.dnskey.rrSet[i] = key
+			currentSignedZone.addPubKey(key)
 		}
-		authChain.delegationChain = append(authChain.delegationChain, *delegation)
+
+		if i > 0 {
+			authChain.delegationChain[i-1].parentZone = currentSignedZone
+		}
+		authChain.delegationChain = append(authChain.delegationChain, *currentSignedZone)
 	}
 	return nil
 }
@@ -102,6 +113,6 @@ func (authChain *AuthenticationChain) Verify(answerRRset *RRSet) error {
 
 // NewAuthenticationChain initializes an AuthenticationChain object and
 // returns a reference to it.
-func NewAuthenticationChain() *AuthenticationChain {
-	return &AuthenticationChain{}
+func NewAuthenticationChain(resolver *Resolver) *AuthenticationChain {
+	return &AuthenticationChain{resolver: resolver}
 }

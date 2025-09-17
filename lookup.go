@@ -44,7 +44,7 @@ func (resolver *Resolver) LookupIP(qname string) (ips []net.IP, err error) {
 	}
 
 	signerName := answers[0].SignerName()
-	authChain := NewAuthenticationChain()
+	authChain := NewAuthenticationChain(resolver)
 	err = authChain.Populate(signerName)
 	if err != nil {
 		log.Printf("Cannot populate authentication chain: %s\n", err)
@@ -93,7 +93,7 @@ func (resolver *Resolver) LookupIPType(qname string, qtype uint16) (ips []net.IP
 	}
 
 	signerName := answer.SignerName()
-	authChain := NewAuthenticationChain()
+	authChain := NewAuthenticationChain(resolver)
 	err = authChain.Populate(signerName)
 	if err != nil {
 		log.Printf("Cannot populate authentication chain: %s\n", err)
@@ -135,7 +135,7 @@ func (resolver *Resolver) StrictNSQuery(qname string, qtype uint16) (rrSet []dns
 
 	signerName := answer.SignerName()
 
-	authChain := NewAuthenticationChain()
+	authChain := NewAuthenticationChain(resolver)
 	err = authChain.Populate(signerName)
 
 	if err == ErrNoResult {

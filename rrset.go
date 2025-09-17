@@ -13,7 +13,7 @@ type RRSet struct {
 
 func (resolver *Resolver) queryRRset(qname string, qtype uint16) (*RRSet, error) {
 
-	r, err := resolver.queryFn(qname, qtype)
+	r, err := resolver.Query(qname, qtype)
 
 	if err != nil {
 		log.Printf("cannot lookup %v", err)

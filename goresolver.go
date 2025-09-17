@@ -2,7 +2,6 @@ package goresolver
 
 import (
 	"errors"
-	"fmt"
 	"log"
 	"net"
 	"strings"
@@ -19,6 +18,15 @@ var (
 	ErrDNSSECValidationFailed = errors.New("DNSSEC validation failed")
 	ErrNoTrustAnchor         = errors.New("no trust anchor found")
 	ErrMaxIterations         = errors.New("maximum iterations exceeded")
+	ErrDnskeyNotAvailable    = errors.New("DNSKEY record not available")
+	ErrInvalidRRsig          = errors.New("RRSIG validation failed")
+	ErrRrsigValidationError  = errors.New("RRSIG validation error")
+	ErrDsNotAvailable        = errors.New("DS record not available")
+	ErrDsInvalid             = errors.New("DS record invalid")
+	ErrResourceNotSigned     = errors.New("resource record set not signed")
+	ErrForgedRRsig           = errors.New("forged RRSIG")
+	ErrRrsigValidityPeriod   = errors.New("RRSIG is outside its validity period")
+	ErrUnknownDsDigestType   = errors.New("unknown DS digest type")
 )
 
 const (
@@ -46,6 +54,8 @@ type Resolver struct {
 	dnsClient    *dns.Client
 	rootServers  []string
 	trustAnchors map[string][]*dns.DNSKEY
+	// Add a cache for validated DNSKEYs to avoid re-validation
+	dnskeyCache map[string][]*dns.DNSKEY
 }
 
 // DNSResult represents the result of a DNS query
@@ -76,6 +86,12 @@ func (r *Resolver) Query(name string, qtype uint16) (*dns.Msg, error) {
 	// Start iterative resolution from root
 	result, err := r.iterativeResolve(name, qtype, true)
 	if err != nil {
+		if errors.Is(err, ErrDNSSECValidationFailed) {
+			// If DNSSEC validation failed, return SERVFAIL
+			msg := new(dns.Msg)
+			msg.SetRcode(new(dns.Msg), dns.RcodeServerFailure)
+			return msg, ErrDNSSECValidationFailed
+		}
 		return nil, err
 	}
 
@@ -172,6 +188,29 @@ func (r *Resolver) iterativeResolve(name string, qtype uint16, dnssec bool) (*DN
 							}
 						} else {
 							log.Printf("Failed to resolve NS name %s: %v", ns.Ns, err)
+						}
+					}
+				}
+				
+				// DNSSEC: Fetch DS records from the parent zone (current authoritative servers)
+				var parentDS []*dns.DS
+				if dnssec {
+					dsResult := r.queryAuthoritativeServers(currentServers, currentDomain, dns.TypeDS, dnssec)
+					if dsResult.Msg != nil && dsResult.Msg.Rcode == dns.RcodeSuccess {
+						for _, rr := range dsResult.Msg.Answer {
+							if ds, ok := rr.(*dns.DS); ok {
+								parentDS = append(parentDS, ds)
+							}
+						}
+					}
+					
+					// Validate delegation if DS records are present
+					if len(parentDS) > 0 || currentDomain == "." {
+						// For root, we don't have parent DS, but we still want to validate DNSKEYs
+						_, err := r.QueryDelegation(currentDomain, parentDS, dnssec)
+						if err != nil {
+							log.Printf("DNSSEC validation failed for delegation %s: %v", currentDomain, err)
+							return &DNSResult{Msg: nil, Err: ErrDNSSECValidationFailed}, nil
 						}
 					}
 				}
@@ -311,6 +350,7 @@ func NewResolver(resolvConf string) (res *Resolver, err error) {
 	
 	// Initialize trust anchors (simplified)
 	resolver.trustAnchors = make(map[string][]*dns.DNSKEY)
+	resolver.dnskeyCache = make(map[string][]*dns.DNSKEY)
 	
 	log.Printf("Initialized resolver with %d root servers", len(resolver.rootServers))
 	
@@ -376,4 +416,137 @@ func (r *Resolver) ResolveCNAME(name string) (*dns.Msg, error) {
 // ResolvePTR resolves PTR records
 func (r *Resolver) ResolvePTR(name string) (*dns.Msg, error) {
 	return r.Query(name, dns.TypePTR)
+}
+
+// QueryDelegation performs DNSSEC validation for a delegated zone.
+// It fetches DS records from the parent, DNSKEYs from the child, and validates them.
+// Returns the validated DNSKEYs for the child zone if successful.
+func (r *Resolver) QueryDelegation(zone string, parentDS []*dns.DS, dnssec bool) ([]*dns.DNSKEY, error) {
+	if !dnssec {
+		return nil, nil // DNSSEC not enabled
+	}
+
+	// Check cache first
+	if keys, ok := r.dnskeyCache[zone]; ok {
+		log.Printf("Using cached DNSKEYs for zone %s", zone)
+		return keys, nil
+	}
+
+	log.Printf("Performing DNSSEC validation for delegated zone: %s", zone)
+
+	// 1. Query DNSKEYs from the child zone
+	childDNSKEYResult := r.queryAuthoritativeServers(r.rootServers, zone, dns.TypeDNSKEY, dnssec)
+	if childDNSKEYResult.Err != nil || childDNSKEYResult.Msg == nil || childDNSKEYResult.Msg.Rcode != dns.RcodeSuccess {
+		log.Printf("Failed to fetch DNSKEYs for %s: %v", zone, childDNSKEYResult.Err)
+		return nil, ErrDNSSECValidationFailed
+	}
+
+	var childDNSKEYs []*dns.DNSKEY
+	var childRRSIGs []*dns.RRSIG
+	for _, rr := range childDNSKEYResult.Msg.Answer {
+		if key, ok := rr.(*dns.DNSKEY); ok {
+			childDNSKEYs = append(childDNSKEYs, key)
+		} else if sig, ok := rr.(*dns.RRSIG); ok {
+			childRRSIGs = append(childRRSIGs, sig)
+		}
+	}
+
+	if len(childDNSKEYs) == 0 {
+		log.Printf("No DNSKEYs found for %s", zone)
+		return nil, ErrDNSSECValidationFailed
+	}
+
+	// 2. Validate RRSIGs for DNSKEYs using the DNSKEYs themselves (self-signed KSKs)
+	// This is a simplified approach. A full validator would need to handle ZSKs and KSKs separately.
+	ksks := getKSKs(childDNSKEYs)
+	if len(ksks) == 0 {
+		log.Printf("No KSKs found for %s", zone)
+		return nil, ErrDNSSECValidationFailed
+	}
+
+	// For each RRSIG, try to validate it with a KSK
+	validatedDNSKEYs := make(map[string]*dns.DNSKEY)
+	for _, sig := range childRRSIGs {
+		if sig.TypeCovered != dns.TypeDNSKEY {
+			continue
+		}
+		for _, key := range ksks {
+			if err := sig.Verify(key, childDNSKEYResult.Msg.Answer); err == nil {
+				log.Printf("Successfully validated RRSIG for DNSKEYs in %s with KSK ID %d", zone, key.KeyTag())
+				// Add all DNSKEYs to the validated set if at least one RRSIG is valid
+				for _, k := range childDNSKEYs {
+					validatedDNSKEYs[k.String()] = k
+				}
+				break // Move to next RRSIG
+			}
+		}
+	}
+
+	if len(validatedDNSKEYs) == 0 {
+		log.Printf("Failed to validate RRSIGs for DNSKEYs in %s", zone)
+		return nil, ErrDNSSECValidationFailed
+	}
+
+	// Convert map back to slice
+	var finalDNSKEYs []*dns.DNSKEY
+	for _, key := range validatedDNSKEYs {
+		finalDNSKEYs = append(finalDNSKEYs, key)
+	}
+
+	// 3. If parentDS is provided, validate DS records against the child's KSKs
+	if len(parentDS) > 0 {
+		log.Printf("Validating DS records for %s against child DNSKEYs", zone)
+		didValidateDS := false
+		for _, ds := range parentDS {
+			for _, key := range finalDNSKEYs {
+				if key.KeyTag() == ds.KeyTag && ds.Algorithm == key.Algorithm {
+					// Re-create DS from DNSKEY and compare digests
+					generatedDS := key.ToDS(ds.DigestType)
+					if generatedDS != nil && compareDigests([]byte(generatedDS.Digest), []byte(ds.Digest)) {
+						didValidateDS = true
+						log.Printf("Successfully validated DS record for %s with DNSKEY ID %d", zone, key.KeyTag())
+						break
+					}
+				}
+			}
+			if didValidateDS {
+				break
+			}
+		}
+		if !didValidateDS {
+			log.Printf("Failed to validate DS records for %s", zone)
+			return nil, ErrDNSSECValidationFailed
+		}
+	} else {
+		log.Printf("No parent DS records provided for %s, skipping DS validation", zone)
+	}
+
+	// Cache validated DNSKEYs
+	r.dnskeyCache[zone] = finalDNSKEYs
+	log.Printf("DNSSEC validation successful for %s. Cached %d DNSKEYs.", zone, len(finalDNSKEYs))
+	return finalDNSKEYs, nil
+}
+
+// getKSKs extracts Key Signing Keys (KSKs) from a slice of DNSKEYs.
+func getKSKs(keys []*dns.DNSKEY) []*dns.DNSKEY {
+	var ksks []*dns.DNSKEY
+	for _, key := range keys {
+		if key.Flags&(dns.ZONE|dns.SEP) == (dns.ZONE|dns.SEP) {
+			ksks = append(ksks, key)
+		}
+	}
+	return ksks
+}
+
+// compareDigests compares two byte slices for equality.
+func compareDigests(d1, d2 []byte) bool {
+	if len(d1) != len(d2) {
+		return false
+	}
+	for i := range d1 {
+		if d1[i] != d2[i] {
+			return false
+		}
+	}
+	return true
 }
