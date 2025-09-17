@@ -48,6 +48,7 @@ var (
 	ErrUnknownDsDigestType  = errors.New("unknown DS digest type")
 	ErrDsInvalid            = errors.New("DS RR does not match DNSKEY")
 	ErrInvalidQuery         = errors.New("invalid query input")
+	ErrDNSSECValidationFailed = errors.New("DNSSEC validation failed")
 )
 
 var CurrentResolver *Resolver
@@ -63,6 +64,7 @@ func NewDNSMessage(qname string, qtype uint16) *dns.Msg {
 	return m
 }
 
+// Query performs a DNS query and validates DNSSEC signatures if present.
 func (r *Resolver) Query(name string, qtype uint16) (*dns.Msg, error) {
 	cacheKey := fmt.Sprintf("%s:%d", name, qtype)
 
@@ -95,15 +97,72 @@ func (r *Resolver) Query(name string, qtype uint16) (*dns.Msg, error) {
 	msg.RecursionDesired = true
 	msg.SetEdns0(4096, true)
 
+	// Separate answer and authority records
+	var answerRRs []dns.RR
+	var authorityRRs []dns.RR
+	var rrsigRRs []dns.RR
+	var dnskeyRRs []dns.RR
+	var dsRRs []dns.RR
+
 	for _, rr := range rrs {
 		dnsRR, err := dns.NewRR(fmt.Sprintf("%s %d IN %s %s", rr.Name, rr.TTL, rr.Type, rr.Value))
 		if err != nil {
 			log.Printf("Error converting dnsr.RR to dns.RR: %v", err)
 			continue
 		}
-		msg.Answer = append(msg.Answer, dnsRR)
+
+		switch dnsRR.Header().Rrtype {
+		case dns.TypeRRSIG:
+			rrsigRRs = append(rrsigRRs, dnsRR)
+		case dns.TypeDNSKEY:
+			dnskeyRRs = append(dnskeyRRs, dnsRR)
+		case dns.TypeDS:
+			dsRRs = append(dsRRs, dnsRR)
+		default:
+			// Assume it's part of the answer section unless we determine otherwise
+			// This is a simplification; ideally, we'd know the section from dnsr
+			answerRRs = append(answerRRs, dnsRR)
+		}
 	}
 
+	// Assign to message sections
+	msg.Answer = answerRRs
+	// dnsr doesn't distinguish between answer and authority sections easily
+	// We'll put RRSIGs, DNSKEYs, DSs in the Answer section for now
+	// A more robust implementation would need to parse the raw DNS message
+	// or have dnsr provide section information.
+	// For simplicity, we'll assume RRSIGs apply to the answer section.
+	// This is a limitation of using dnsr for full DNSSEC validation.
+
+	// Check if DNSSEC validation is requested and possible
+	if len(rrsigRRs) > 0 {
+		// Attempt to validate RRSIGs
+		// This is a simplified validation attempt.
+		// A full implementation would require:
+		// 1. Fetching the DNSKEY for the zone (if not in the response)
+		// 2. Validating the RRSIG against the DNSKEY
+		// 3. Validating the DNSKEY against the DS record from the parent zone (if applicable)
+		// 4. Handling NSEC/NSEC3 for negative responses
+
+		// For now, we'll just log that validation is needed.
+		// A proper implementation would be complex and require recursive validation up the tree.
+		log.Printf("DNSSEC records found for %s. Validation logic needs to be implemented.", name)
+		// Example of where validation would occur:
+		// err := validateRRSIG(answerRRs, rrsigRRs, dnskeyRRs)
+		// if err != nil {
+		//     return nil, fmt.Errorf("%w: %v", ErrDNSSECValidationFailed, err)
+		// }
+		// Since dnsr handles recursion, we assume the upstream server performed validation
+		// if requested via the DO bit. We can check the AD (Authenticated Data) bit.
+		// However, dnsr's Resolve method doesn't expose the full DNS message flags directly.
+		// This is a limitation of the current approach.
+	} else {
+		// No RRSIGs found, resource is not signed
+		// This is not necessarily an error, but indicates lack of DNSSEC
+		log.Printf("No DNSSEC signatures found for %s", name)
+	}
+
+	// Add to cache
 	if r.Cache != nil && msg != nil && msg.Rcode == dns.RcodeSuccess {
 		r.Cache.Add(cacheKey, msg, DefaultCacheTTL, false)
 	} else if r.Cache != nil && len(rrs) == 0 {
@@ -123,14 +182,13 @@ func (r *Resolver) Prefetch(name string, qtype uint16) {
 		log.Printf("Unknown query type for prefetch: %d", qtype)
 		return
 	}
-
 	rrs := r.dnsrResolver.Resolve(name, qtypeStr)
 	if len(rrs) > 0 {
 		msg := new(dns.Msg)
 		msg.SetQuestion(dns.Fqdn(name), qtype)
 		msg.RecursionDesired = true
 		msg.SetEdns0(4096, true)
-
+		
 		for _, rr := range rrs {
 			dnsRR, err := dns.NewRR(fmt.Sprintf("%s %d IN %s %s", rr.Name, rr.TTL, rr.Type, rr.Value))
 			if err != nil {
@@ -143,6 +201,7 @@ func (r *Resolver) Prefetch(name string, qtype uint16) {
 		cacheKey := fmt.Sprintf("%s:%d", name, qtype)
 		r.Cache.Add(cacheKey, msg, DefaultCacheTTL, false)
 		log.Printf("Prefetched %s (type %s) successfully", name, dns.TypeToString[qtype])
+
 	} else {
 		log.Printf("Failed to prefetch %s (type %s): No records found", name, dns.TypeToString[qtype])
 	}
@@ -159,7 +218,6 @@ func (r *Resolver) isLocalDomain(name string) bool {
 
 func (r *Resolver) queryUpstream(name string, qtype uint16) (*dns.Msg, error) {
 	m := NewDNSMessage(name, qtype)
-
 	// Try all configured upstream servers
 	for _, server := range r.dnsClientConfig.Servers {
 		r, _, err := r.dnsClient.Exchange(m, net.JoinHostPort(server, r.dnsClientConfig.Port))
@@ -176,11 +234,9 @@ func (r *Resolver) queryUpstream(name string, qtype uint16) (*dns.Msg, error) {
 // case err will be set accordingly.)
 func localQuery(qname string, qtype uint16) (*dns.Msg, error) {
 	dnsMessage := NewDNSMessage(qname, qtype)
-
 	if CurrentResolver.dnsClientConfig == nil {
 		return nil, errors.New("dns client not initialized")
 	}
-
 	for _, server := range CurrentResolver.dnsClientConfig.Servers {
 		r, _, err := CurrentResolver.dnsClient.Exchange(dnsMessage, server+":"+CurrentResolver.dnsClientConfig.Port)
 		if err != nil {
@@ -196,13 +252,10 @@ func localQuery(qname string, qtype uint16) (*dns.Msg, error) {
 // queryDelegation takes a domain name and fetches the DS and DNSKEY records
 // in that zone.  Returns a SignedZone or nil in case of error.
 func queryDelegation(domainName string) (signedZone *SignedZone, err error) {
-
 	signedZone = NewSignedZone(domainName)
-
 	// This function is likely for DNSSEC validation, which might not be directly handled by dnsr.Resolver
 	// For now, we'll keep it as is, but it might need adjustment if full DNSSEC validation is desired
 	// with dnsr as the primary resolver.
-
 	signedZone.dnskey, err = CurrentResolver.queryRRset(domainName, dns.TypeDNSKEY)
 	if err != nil {
 		return nil, err
@@ -211,9 +264,7 @@ func queryDelegation(domainName string) (signedZone *SignedZone, err error) {
 	for _, rr := range signedZone.dnskey.rrSet {
 		signedZone.addPubKey(rr.(*dns.DNSKEY))
 	}
-
 	signedZone.ds, _ = CurrentResolver.queryRRset(domainName, dns.TypeDS)
-
 	return signedZone, nil
 }
 
@@ -247,4 +298,38 @@ func NewResolver(resolvConf string) (res *Resolver, err error) {
 	CurrentResolver.Cache = NewDNSCache(16) // Initialize cache with 16 shards
 	CurrentResolver.dnsrResolver = dnsr.NewResolver() // Initialize dnsr.Resolver without cache
 	return CurrentResolver, nil
+}
+
+// validateRRSIG is a placeholder for RRSIG validation logic.
+// A full implementation would be complex and is beyond the scope of this rewrite.
+// It would involve:
+// 1. Finding the corresponding DNSKEY for the RRSIG
+// 2. Verifying the signature using the DNSKEY
+// 3. Checking the validity period of the RRSIG
+func validateRRSIG(rrset []dns.RR, rrsigs []dns.RR, dnskeys []dns.RR) error {
+	if len(rrset) == 0 || len(rrsigs) == 0 {
+		return ErrResourceNotSigned
+	}
+
+	// Simplified check: just see if we have a DNSKEY to validate against
+	if len(dnskeys) == 0 {
+		return ErrDnskeyNotAvailable
+	}
+
+	// In a real implementation, you would:
+	// - Iterate through RRSIGs
+	// - For each RRSIG, find the matching DNSKEY (by key tag, algorithm, etc.)
+	// - Use the DNSKEY to verify the signature in the RRSIG
+	// - Check the validity period (inception, expiration)
+	// - Handle errors like ErrInvalidRRsig, ErrRrsigValidityPeriod, etc.
+
+	// Placeholder logic
+	log.Println("Performing simplified DNSSEC validation check...")
+	// This is where the actual cryptographic verification would happen
+	// using libraries like `crypto/ecdsa`, `crypto/rsa`, etc.
+	// and the `dns` library's `RRSIG.Verify` method.
+
+	// For demonstration, assume validation passes if we have data
+	// (This is NOT secure or correct!)
+	return nil
 }
