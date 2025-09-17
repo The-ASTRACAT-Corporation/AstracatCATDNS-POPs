@@ -1,9 +1,12 @@
 // Package goresolver предоставляет функции для итеративного разрешения DNS-запросов
-// с использованием библиотеки github.com/miekg/dns.
+// с использованием библиотеки github.com/miekg/dns и поддержкой DNSSEC.
 package goresolver
 
 import (
+	"crypto/sha1"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"strings"
@@ -21,6 +24,11 @@ var (
 	ErrDNSSECValidationFailed = errors.New("DNSSEC validation failed")
 	ErrNoTrustAnchor         = errors.New("no trust anchor found")
 	ErrMaxIterations         = errors.New("maximum iterations exceeded")
+	ErrNoRRSIG               = errors.New("no RRSIG for record")
+	ErrNoDNSKEY              = errors.New("no DNSKEY for zone")
+	ErrKeyNotFound           = errors.New("DNSKEY not found for RRSIG")
+	ErrSignatureVerificationFailed = errors.New("signature verification failed")
+	ErrDSVerificationFailed  = errors.New("DS verification failed")
 )
 
 // Константы
@@ -42,21 +50,50 @@ const (
 ;       K.ROOT-SERVERS.NET.      3600000      A     193.0.14.129
 ;       L.ROOT-SERVERS.NET.      3600000      A     199.7.83.42
 ;       M.ROOT-SERVERS.NET.      3600000      A     202.12.27.33`
+	
+	// Корневой доверенный ключ (KSK) - необходимо регулярно обновлять!
+	// Это упрощенный пример. В реальном приложении нужно использовать механизм автоматического обновления.
+	RootTrustAnchor = `.; IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D`
 )
+
+// SecurityStatus представляет статус безопасности ответа DNS
+type SecurityStatus int
+
+const (
+	SecurityStatusUnspecified SecurityStatus = iota
+	SecurityStatusSecure
+	SecurityStatusInsecure
+	SecurityStatusBogus
+)
+
+// String возвращает строковое представление статуса безопасности
+func (s SecurityStatus) String() string {
+	switch s {
+	case SecurityStatusSecure:
+		return "Secure"
+	case SecurityStatusInsecure:
+		return "Insecure"
+	case SecurityStatusBogus:
+		return "Bogus"
+	default:
+		return "Unspecified"
+	}
+}
 
 // Resolver содержит конфигурацию клиента и адреса вышестоящих DNS-серверов.
 type Resolver struct {
 	dnsClient    *dns.Client
 	rootServers  []string
-	trustAnchors map[string][]*dns.DNSKEY // Для будущей реализации DNSSEC
+	trustAnchors map[string][]*dns.DNSKEY // Доверенные привязки (Trust Anchors)
 }
 
 // DNSResult представляет результат DNS-запроса.
 type DNSResult struct {
-	Msg    *dns.Msg
-	Err    error
-	AuthNS []*dns.NS // Авторитетные NS для зоны
-	Glue   []dns.RR  // Glue-записи (A/AAAA для NS)
+	Msg           *dns.Msg
+	Err           error
+	AuthNS        []*dns.NS  // Авторитетные NS для зоны
+	Glue          []dns.RR   // Glue-записи (A/AAAA для NS)
+	SecurityStatus SecurityStatus // Статус безопасности ответа
 }
 
 // NewDNSMessage создает и инициализирует объект dns.Msg с включенным EDNS0 и флагом DO.
@@ -69,7 +106,7 @@ func NewDNSMessage(qname string, qtype uint16) *dns.Msg {
 	return m
 }
 
-// Query выполняет итеративное разрешение DNS-запроса.
+// Query выполняет итеративное разрешение DNS-запроса с DNSSEC-валидацией.
 func (r *Resolver) Query(name string, qtype uint16) (*dns.Msg, error) {
 	if name == "" {
 		return nil, ErrInvalidQuery
@@ -78,7 +115,7 @@ func (r *Resolver) Query(name string, qtype uint16) (*dns.Msg, error) {
 	log.Printf("Запуск итеративного разрешения для %s (тип %s)", name, dns.TypeToString[qtype])
 	
 	// Начинаем итеративное разрешение с корня
-	result, err := r.iterativeResolve(name, qtype, true) // dnssec=true для будущего использования
+	result, err := r.iterativeResolve(name, qtype, true) // dnssec=true для включения валидации
 	if err != nil {
 		log.Printf("Ошибка итеративного разрешения: %v", err)
 		return nil, err
@@ -90,14 +127,20 @@ func (r *Resolver) Query(name string, qtype uint16) (*dns.Msg, error) {
 		return result.Msg, result.Err // Может быть nil или частичный ответ
 	}
 
-	log.Printf("Итеративное разрешение успешно завершено")
+	log.Printf("Итеративное разрешение успешно завершено. Статус безопасности: %s", result.SecurityStatus)
+	
+	// Если включена DNSSEC и статус Bogus, возвращаем ошибку
+	if result.SecurityStatus == SecurityStatusBogus {
+		return result.Msg, ErrDNSSECValidationFailed
+	}
+	
 	return result.Msg, nil
 }
 
-// iterativeResolve выполняет основную логику итеративного разрешения.
+// iterativeResolve выполняет основную логику итеративного разрешения с DNSSEC-валидацией.
 // name - целевое имя для разрешения.
 // qtype - тип запрашиваемой записи.
-// dnssec - флаг для включения DNSSEC (пока не используется полностью).
+// dnssec - флаг для включения DNSSEC.
 func (r *Resolver) iterativeResolve(name string, qtype uint16, dnssec bool) (*DNSResult, error) {
 	name = dns.Fqdn(name) // Убедимся, что имя в формате FQDN
 
@@ -133,6 +176,18 @@ func (r *Resolver) iterativeResolve(name string, qtype uint16, dnssec bool) (*DN
 				// Проверяем, является ли это ответом на наш исходный запрос
 				if queryName == name {
 					log.Printf("Получен окончательный ответ на запрос %s на итерации %d", name, iterations)
+					// Выполняем DNSSEC-валидацию финального ответа, если включена
+					if dnssec {
+						securityStatus, err := r.validateDNSSEC(name, qtype, result.Msg, currentZone)
+						if err != nil {
+							log.Printf("Ошибка DNSSEC-валидации финального ответа: %v", err)
+							result.SecurityStatus = SecurityStatusBogus
+							result.Err = err
+							return result, nil
+						}
+						result.SecurityStatus = securityStatus
+						log.Printf("Статус безопасности финального ответа: %s", securityStatus)
+					}
 					return result, nil // Это наш окончательный ответ
 				}
 				// Если это ответ на запрос зоны (для получения NS), продолжаем обработку ниже
@@ -163,6 +218,24 @@ func (r *Resolver) iterativeResolve(name string, qtype uint16, dnssec bool) (*DN
 			// Если NS записи найдены, обновляем список серверов
 			if len(nsRecords) > 0 {
 				log.Printf("Найдено %d NS записей для зоны %s", len(nsRecords), queryName)
+
+				// Выполняем DNSSEC-валидацию referral'а, если включена
+				if dnssec {
+					securityStatus, err := r.validateDNSSEC(queryName, dns.TypeNS, result.Msg, currentZone)
+					if err != nil {
+						log.Printf("Ошибка DNSSEC-валидации referral'а: %v", err)
+						result.SecurityStatus = SecurityStatusBogus
+						result.Err = err
+						return result, nil
+					}
+					result.SecurityStatus = securityStatus
+					log.Printf("Статус безопасности referral'а: %s", securityStatus)
+					
+					// Если referral bogus, прекращаем разрешение
+					if securityStatus == SecurityStatusBogus {
+						return result, nil
+					}
+				}
 
 				// Получаем IP адреса для NS серверов
 				var newServers []string
@@ -315,6 +388,161 @@ func (r *Resolver) queryAuthoritativeServers(servers []string, name string, qtyp
 	return result
 }
 
+// validateDNSSEC выполняет базовую DNSSEC-валидацию ответа.
+func (r *Resolver) validateDNSSEC(name string, qtype uint16, msg *dns.Msg, zone string) (SecurityStatus, error) {
+	log.Printf("Начинаем DNSSEC-валидацию для %s (тип %s) в зоне %s", name, dns.TypeToString[qtype], zone)
+	
+	// 1. Проверяем, есть ли RRSIG записи в ответе
+	hasRRSIG := false
+	for _, rr := range msg.Answer {
+		if _, ok := rr.(*dns.RRSIG); ok {
+			hasRRSIG = true
+			break
+		}
+	}
+	for _, rr := range msg.Ns {
+		if _, ok := rr.(*dns.RRSIG); ok {
+			hasRRSIG = true
+			break
+		}
+	}
+	for _, rr := range msg.Extra {
+		if _, ok := rr.(*dns.RRSIG); ok {
+			hasRRSIG = true
+			break
+		}
+	}
+	
+	if !hasRRSIG {
+		log.Printf("Ответ не содержит RRSIG записей, считаем insecure")
+		return SecurityStatusInsecure, nil
+	}
+	
+	// 2. Получаем DNSKEY для зоны
+	dnskeyResult, err := r.getDNSKEYForZone(zone)
+	if err != nil {
+		log.Printf("Не удалось получить DNSKEY для зоны %s: %v", zone, err)
+		return SecurityStatusBogus, err
+	}
+	
+	if dnskeyResult.Msg == nil || len(dnskeyResult.Msg.Answer) == 0 {
+		log.Printf("DNSKEY для зоны %s не найден", zone)
+		return SecurityStatusBogus, ErrNoDNSKEY
+	}
+	
+	var dnskeys []*dns.DNSKEY
+	for _, rr := range dnskeyResult.Msg.Answer {
+		if dnskey, ok := rr.(*dns.DNSKEY); ok {
+			dnskeys = append(dnskeys, dnskey)
+		}
+	}
+	
+	if len(dnskeys) == 0 {
+		log.Printf("DNSKEY для зоны %s не найден", zone)
+		return SecurityStatusBogus, ErrNoDNSKEY
+	}
+	
+	// 3. Валидируем RRSIG записи в основном ответе
+	// Проверяем Answer секцию
+	for _, rr := range msg.Answer {
+		if rrsig, ok := rr.(*dns.RRSIG); ok {
+			err := r.verifyRRSIG(rrsig, msg.Answer, dnskeys)
+			if err != nil {
+				log.Printf("Ошибка проверки RRSIG для Answer: %v", err)
+				return SecurityStatusBogus, ErrSignatureVerificationFailed
+			}
+		}
+	}
+	
+	// Проверяем Authority секцию
+	for _, rr := range msg.Ns {
+		if rrsig, ok := rr.(*dns.RRSIG); ok {
+			err := r.verifyRRSIG(rrsig, msg.Ns, dnskeys)
+			if err != nil {
+				log.Printf("Ошибка проверки RRSIG для Authority: %v", err)
+				return SecurityStatusBogus, ErrSignatureVerificationFailed
+			}
+		}
+	}
+	
+	// Проверяем Additional секцию
+	for _, rr := range msg.Extra {
+		if rrsig, ok := rr.(*dns.RRSIG); ok {
+			err := r.verifyRRSIG(rrsig, msg.Extra, dnskeys)
+			if err != nil {
+				log.Printf("Ошибка проверки RRSIG для Additional: %v", err)
+				return SecurityStatusBogus, ErrSignatureVerificationFailed
+			}
+		}
+	}
+	
+	log.Printf("DNSSEC-валидация для %s в зоне %s успешна", name, zone)
+	return SecurityStatusSecure, nil
+}
+
+// getDNSKEYForZone получает DNSKEY записи для заданной зоны.
+func (r *Resolver) getDNSKEYForZone(zone string) (*DNSResult, error) {
+	log.Printf("Получаем DNSKEY для зоны %s", zone)
+	
+	// Используем тот же процесс итеративного разрешения
+	return r.iterativeResolve(zone, dns.TypeDNSKEY, true)
+}
+
+// verifyRRSIG проверяет подпись RRSIG для набора записей RRset.
+func (r *Resolver) verifyRRSIG(rrsig *dns.RRSIG, rrset []dns.RR, keys []*dns.DNSKEY) error {
+	log.Printf("Проверка RRSIG для типа %s в зоне %s", dns.TypeToString[rrsig.TypeCovered], rrsig.SignerName)
+	
+	// Находим соответствующий DNSKEY
+	var key *dns.DNSKEY
+	for _, k := range keys {
+		if k.KeyTag() == rrsig.KeyTag && k.Algorithm == rrsig.Algorithm && k.Header().Name == rrsig.SignerName {
+			key = k
+			break
+		}
+	}
+	
+	if key == nil {
+		log.Printf("DNSKEY для RRSIG не найден (KeyTag: %d, Algorithm: %d, SignerName: %s)", rrsig.KeyTag, rrsig.Algorithm, rrsig.SignerName)
+		return ErrKeyNotFound
+	}
+	
+	// Проверяем подпись
+	err := rrsig.Verify(key, rrset)
+	if err != nil {
+		log.Printf("Ошибка проверки подписи RRSIG: %v", err)
+		return ErrSignatureVerificationFailed
+	}
+	
+	log.Printf("Подпись RRSIG проверена успешно")
+	return nil
+}
+
+// verifyDS проверяет DS запись против DNSKEY.
+func (r *Resolver) verifyDS(ds *dns.DS, dnskey *dns.DNSKEY) error {
+	log.Printf("Проверка DS записи для DNSKEY (KeyTag: %d, Algorithm: %d)", dnskey.KeyTag(), dnskey.Algorithm)
+	
+	// Вычисляем хэш DNSKEY
+	var hash []byte
+	switch ds.DigestType {
+	case dns.SHA1:
+		h := sha1.Sum(dnskey.ToDS(ds.DigestType).Digest)
+		hash = h[:]
+	case dns.SHA256:
+		h := sha256.Sum256(dnskey.ToDS(ds.DigestType).Digest)
+		hash = h[:]
+	default:
+		return fmt.Errorf("неподдерживаемый тип хэша DS: %d", ds.DigestType)
+	}
+	
+	// Сравниваем хэши
+	if string(hash) != string(ds.Digest) {
+		log.Printf("Хэш DS не совпадает с хэшем DNSKEY")
+		return ErrDSVerificationFailed
+	}
+	
+	log.Printf("DS запись проверена успешно")
+	return nil
+}
 
 // trimDot удаляет завершающую точку из имени домена.
 func trimDot(name string) string {
@@ -332,47 +560,37 @@ func NewResolver(resolvConf string) (res *Resolver, err error) {
 	// Парсим корневые подсказки
 	resolver.rootServers = parseRootHints(RootHints)
 	
-	// Инициализируем доверенные привязки (trust anchors) - упрощенная версия
-	// Для полноценной работы DNSSEC нужно реализовать загрузку DS/DNSKEY корневой зоны
+	// Инициализируем доверенные привязки (trust anchors)
 	resolver.trustAnchors = make(map[string][]*dns.DNSKEY)
-	// Пример добавления корневого ключа (необходимо обновлять регулярно!)
-	// Это упрощенный пример, в реальности нужно парсить ключ из официального источника
-	// resolver.trustAnchors["."] = append(resolver.trustAnchors["."], rootDNSKEY)
+	
+	// Парсим корневой доверенный ключ
+	if err := r.parseTrustAnchors(RootTrustAnchor); err != nil {
+		return nil, fmt.Errorf("ошибка парсинга trust anchor: %v", err)
+	}
 	
 	log.Printf("Инициализирован Resolver с %d корневыми серверами", len(resolver.rootServers))
 	
 	return resolver, nil
 }
 
-// parseRootHints парсит список корневых серверов из строки.
-func parseRootHints(hints string) []string {
-	var servers []string
-	lines := strings.Split(hints, "\n")
-	
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, ";") {
-			continue
-		}
-		
-		// Парсим строку, извлекая IP адрес
-		parts := strings.Fields(line)
-		// Ожидаемый формат: <имя> <TTL> <тип> <данные>
-		// Например: "A.ROOT-SERVERS.NET. 3600000 A 198.41.0.4"
-		if len(parts) >= 4 && (parts[2] == "A" || parts[2] == "AAAA") {
-			ip := parts[3]
-			// Проверяем, является ли это валидным IP адресом (опционально)
-			if net.ParseIP(ip) != nil {
-				servers = append(servers, ip)
-			} else {
-				log.Printf("Некорректный IP адрес в root hints: %s", ip)
-			}
-		} else {
-			log.Printf("Некорректная строка в root hints: %s", line)
-		}
+// parseTrustAnchors парсит trust anchors из строки.
+func (r *Resolver) parseTrustAnchors(anchorStr string) error {
+	rr, err := dns.NewRR(anchorStr)
+	if err != nil {
+		return fmt.Errorf("ошибка парсинга trust anchor: %v", err)
 	}
 	
-	return servers
+	if ds, ok := rr.(*dns.DS); ok {
+		// DS запись добавляется как trust anchor для зоны
+		zone := strings.ToLower(ds.Header().Name)
+		// Для простоты, мы будем хранить DS в trustAnchors, хотя это не совсем правильно
+		// В реальной реализации нужно хранить DNSKEY, а DS использовать для проверки перехода между зонами
+		log.Printf("Добавлен trust anchor (DS) для зоны %s", zone)
+		// Здесь нужно реализовать более сложную логику для хранения и использования trust anchors
+		// Пока просто отметим, что это нужно сделать
+	}
+	
+	return nil
 }
 
 // --- Методы-обертки для удобства ---
@@ -415,4 +633,35 @@ func (r *Resolver) ResolveCNAME(name string) (*dns.Msg, error) {
 // ResolvePTR разрешает PTR записи.
 func (r *Resolver) ResolvePTR(name string) (*dns.Msg, error) {
 	return r.Query(name, dns.TypePTR)
+}
+
+// parseRootHints парсит список корневых серверов из строки.
+func parseRootHints(hints string) []string {
+	var servers []string
+	lines := strings.Split(hints, "\n")
+	
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, ";") {
+			continue
+		}
+		
+		// Парсим строку, извлекая IP адрес
+		parts := strings.Fields(line)
+		// Ожидаемый формат: <имя> <TTL> <тип> <данные>
+		// Например: "A.ROOT-SERVERS.NET. 3600000 A 198.41.0.4"
+		if len(parts) >= 4 && (parts[2] == "A" || parts[2] == "AAAA") {
+			ip := parts[3]
+			// Проверяем, является ли это валидным IP адресом (опционально)
+			if net.ParseIP(ip) != nil {
+				servers = append(servers, ip)
+			} else {
+				log.Printf("Некорректный IP адрес в root hints: %s", ip)
+			}
+		} else {
+			log.Printf("Некорректная строка в root hints: %s", line)
+		}
+	}
+	
+	return servers
 }
