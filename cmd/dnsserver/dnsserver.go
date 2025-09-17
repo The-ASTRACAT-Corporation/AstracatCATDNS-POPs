@@ -7,7 +7,7 @@ import (
 	"net"
 	"strings"
 	"time"
-   "fmt"
+ "fmt"
 
 	"github.com/miekg/dns"
 )
