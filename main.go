@@ -2,74 +2,68 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"dns-resolver/internal/resolver" // Используем наш новый внутренний резолвер
+	"github.com/miekg/dns"
 	"log"
 	"time"
-
-	"github.com/miekg/dns"
-	"github.com/nsmithuk/resolver"
 )
 
 const (
-	port = ":5053"
-	defaultShards = 32 // Example: 32 shards
+	port          = ":5053"
+	defaultShards = 32 // Пример: 32 шарда
 )
 
 type DnsJob struct {
-	w  dns.ResponseWriter
-	req *dns.Msg
+	w            dns.ResponseWriter
+	req          *dns.Msg
 	shardedCache *ShardedCache
-	r *resolver.Resolver
+	r            *resolver.Resolver // Используем наш новый резолвер
 }
 
 func (j *DnsJob) Execute() {
-	// Generate a cache key from the DNS question
+	// Генерируем ключ кэша из DNS-запроса
 	cacheKey := j.req.Question[0].Name + ":" + dns.TypeToString[j.req.Question[0].Qtype]
 
-	// Try to get the response from cache
+	// Пытаемся получить ответ из кэша
 	if cachedMsg, found, isNegative, _ := j.shardedCache.Get(cacheKey); found {
 		if isNegative {
 			log.Printf("Cache HIT (negative) for %s", cacheKey)
-			// If it's a negative cache entry, return SERVFAIL or NXDOMAIN directly
 			m := new(dns.Msg)
-			m.SetRcode(j.req, dns.RcodeServerFailure) // Or appropriate negative response
+			m.SetRcode(j.req, dns.RcodeServerFailure) // Или соответствующий отрицательный ответ
 			j.w.WriteMsg(m)
 			return
 		} else {
 			log.Printf("Cache HIT (positive) for %s", cacheKey)
-			// If it's a positive entry but not DNSSEC validated, and we want to re-check often,
-			// we could force a re-lookup here or use a very short TTL for such entries.
-			// For now, we just return the cached message.
-			cachedMsg.SetRcode(j.req, cachedMsg.Rcode) // Ensure the response code is set correctly
-			cachedMsg.Id = j.req.Id // Set the ID to match the request ID
+			cachedMsg.Id = j.req.Id // Устанавливаем ID, чтобы он соответствовал ID запроса
 			j.w.WriteMsg(cachedMsg)
 			return
 		}
 	}
 	log.Printf("Cache MISS for %s", cacheKey)
-	// Create a new message to pass to the resolver, mimicking client behavior
+
+	// Создаем новое сообщение для передачи резолверу
 	msg := new(dns.Msg)
 	msg.SetQuestion(j.req.Question[0].Name, j.req.Question[0].Qtype)
-	msg.SetEdns0(4096, true) // Enable EDNS0 with DNSSEC OK bit on the new message
+	msg.SetEdns0(4096, true) // Включаем EDNS0 с флагом DNSSEC OK
 
+	// Используем наш новый резолвер
 	result := j.r.Exchange(context.Background(), msg)
 	if result.Err != nil {
 		log.Printf("Error exchanging DNS query: %v", result.Err)
 		m := new(dns.Msg)
-		// If there's an error, it's not DNSSEC validated
 		m.SetRcode(j.req, dns.RcodeServerFailure)
 		j.w.WriteMsg(m)
-		// Cache SERVFAIL with a short TTL and mark as not DNSSEC validated
-		j.shardedCache.Set(cacheKey, m, 30*time.Second, true, false)
+		// Кэшируем SERVFAIL с коротким TTL
+		j.shardedCache.Set(cacheKey, m, 30*time.Second, true, false) // Предполагаем, что при ошибке валидация не пройдена
 		return
 	}
 
-	// Set the Recursion Available (RA) flag
-	result.Msg.SetRcode(j.req, result.Msg.Rcode)
+	// Устанавливаем флаг Recursion Available (RA)
 	result.Msg.RecursionAvailable = true
+	result.Msg.Id = j.req.Id
 
-	// Determine TTL for caching. Use the minimum TTL from answers, or a default.
-	ttl := 60 * time.Second // Default TTL
+	// Определяем TTL для кэширования.
+	ttl := 60 * time.Second // TTL по умолчанию
 	if len(result.Msg.Answer) > 0 {
 		minTTL := result.Msg.Answer[0].Header().Ttl
 		for _, rr := range result.Msg.Answer {
@@ -80,43 +74,41 @@ func (j *DnsJob) Execute() {
 		ttl = time.Duration(minTTL) * time.Second
 	}
 
-	// Determine DNSSEC validation status
+	// Определяем статус DNSSEC-валидации по флагу AD
 	dnssecValidated := result.Msg.AuthenticatedData
 
-	// If DNSSEC is not validated, use a very short TTL for re-checking
+	// Если DNSSEC не валидирован, используем очень короткий TTL для повторной проверки
 	if !dnssecValidated {
-		ttl = 5 * time.Second // Very short TTL for unvalidated entries
+		ttl = 5 * time.Second // Очень короткий TTL для невалидированных записей
 	}
 
-	// Cache the positive response
+	// Кэшируем положительный ответ
 	j.shardedCache.Set(cacheKey, result.Msg, ttl, false, dnssecValidated)
 
 	j.w.WriteMsg(result.Msg)
 }
 
 func main() {
-	// Override the default logging hook on resolver.
-	resolver.Query = func(s string) {
-		fmt.Println("Query: " + s)
-	}
+	// Нам больше не нужен хук логирования из старого резолвера
 
-	// Initialize Sharded Cache
+	// Инициализируем шард-кэш
 	shardedCache := NewShardedCache(defaultShards, 1*time.Minute)
 	defer shardedCache.Stop()
 
-	// Initialize Worker Pool
-	workerPool := NewWorkerPool(100, 1000) // 100 workers, 1000 job queue size
+	// Инициализируем пул воркеров
+	workerPool := NewWorkerPool(100, 1000) // 100 воркеров, размер очереди 1000
 	workerPool.Start()
 	defer workerPool.Stop()
 
+	// Инициализируем наш новый резолвер
 	r := resolver.NewResolver()
 
 	dns.HandleFunc(".", func(w dns.ResponseWriter, req *dns.Msg) {
 		job := &DnsJob{
-			w:  w,
-			req: req,
+			w:            w,
+			req:          req,
 			shardedCache: shardedCache,
-			r: r,
+			r:            r,
 		}
 		workerPool.Submit(job)
 	})
@@ -124,7 +116,7 @@ func main() {
 	server := &dns.Server{
 		Addr:    port,
 		Net:     "udp",
-		UDPSize: 65535, // Set UDPSize to max for EDNS0
+		UDPSize: 65535, // Устанавливаем максимальный UDPSize для EDNS0
 	}
 
 	log.Printf("Starting DNS resolver on %s", port)
