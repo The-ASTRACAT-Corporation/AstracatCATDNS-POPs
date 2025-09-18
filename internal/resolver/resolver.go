@@ -29,6 +29,13 @@ var rootHints = map[string]string{
 // rootTrustAnchorDS - это DS-запись для корневого ключа KSK-2017.
 const rootTrustAnchorDS = ". IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D"
 
+var (
+	// ErrBogus - DNSSEC-валидация не пройдена (BOGUS).
+	ErrBogus = fmt.Errorf("bogus")
+	// ErrInsecure - зона не подписана (INSECURE).
+	ErrInsecure = fmt.Errorf("insecure")
+)
+
 // Result - это результат разрешения.
 type Result struct {
 	Msg *dns.Msg
@@ -50,18 +57,30 @@ func (r *Resolver) Exchange(ctx context.Context, msg *dns.Msg) *Result {
 
 	finalMsg, err := r.resolve(ctx, msg.Question[0].Name, msg.Question[0].Qtype)
 	if err != nil {
-		return &Result{Err: err}
+		servFail := new(dns.Msg)
+		servFail.SetRcode(msg, dns.RcodeServerFailure)
+		return &Result{Msg: servFail, Err: err}
 	}
+
+	finalMsg.Id = msg.Id
 
 	err = r.validate(ctx, finalMsg)
 	if err != nil {
+		if err == ErrInsecure {
+			fmt.Println("DNSSEC status: Insecure")
+			finalMsg.AuthenticatedData = false
+			return &Result{Msg: finalMsg}
+		}
+
 		fmt.Printf("DNSSEC validation failed: %v\n", err)
-		return &Result{Err: fmt.Errorf("DNSSEC validation failed: %w", err)}
+		servFail := new(dns.Msg)
+		servFail.SetRcode(msg, dns.RcodeServerFailure)
+		servFail.Id = msg.Id
+		return &Result{Msg: servFail, Err: fmt.Errorf("DNSSEC validation failed: %w", err)}
 	}
 
 	fmt.Println("DNSSEC validation successful!")
 	finalMsg.AuthenticatedData = true
-	finalMsg.Id = msg.Id
 	return &Result{Msg: finalMsg}
 }
 
@@ -119,9 +138,17 @@ func (r *Resolver) resolve(ctx context.Context, qname string, qtype uint16) (*dn
 
 // validate - выполняет DNSSEC-валидацию ответа.
 func (r *Resolver) validate(ctx context.Context, finalMsg *dns.Msg) error {
-	if len(finalMsg.Answer) == 0 {
+	if finalMsg.Rcode != dns.RcodeSuccess {
+		return ErrInsecure // Не можем проверить, если нет ответа
+	}
+	if len(finalMsg.Answer) == 0 && len(finalMsg.Ns) > 0 {
 		// TODO: Validate non-existence with NSEC/NSEC3
-		return nil
+		// Пока считаем это insecure
+		for _, rr := range finalMsg.Ns {
+			if _, ok := rr.(*dns.SOA); ok {
+				return ErrInsecure
+			}
+		}
 	}
 
 	rootDS, err := dns.NewRR(rootTrustAnchorDS)
@@ -135,35 +162,40 @@ func (r *Resolver) validate(ctx context.Context, finalMsg *dns.Msg) error {
 
 	for i := len(zones) - 1; i >= 0; i-- {
 		zone := zones[i]
-		// fmt.Printf("Validating chain for zone: %s\n", zone)
-
 		keys, err := r.validateZone(ctx, zone, trustedDS)
 		if err != nil {
 			return fmt.Errorf("failed to validate zone %s: %w", zone, err)
 		}
 		trustedKeys = keys
 
-		if i > 0 {
-			nextZone := zones[i-1]
-			dsMsg, err := r.resolve(ctx, nextZone, dns.TypeDS)
-			if err != nil {
-				return fmt.Errorf("could not get DS for %s: %w", nextZone, err)
-			}
-			if err := verifyRRSIGs(dsMsg.Answer, trustedKeys); err != nil {
-				return fmt.Errorf("failed to verify DS RRset for %s: %w", nextZone, err)
-			}
-			trustedDS = extractDSs(dsMsg.Answer)
-			if len(trustedDS) == 0 {
-				// This can happen for zones that are not signed.
-				// In a real resolver, we would check the DS from the parent,
-				// and if it's not present, we would stop validation for this chain.
-				// For now, we assume all zones are signed.
-				// return fmt.Errorf("no DS records found for %s", nextZone)
-			}
+		if i == 0 {
+			break
+		}
+
+		nextZone := zones[i-1]
+		dsMsg, err := r.resolve(ctx, nextZone, dns.TypeDS)
+		if err != nil {
+			return fmt.Errorf("could not get DS for %s: %w", nextZone, err)
+		}
+
+		if dsMsg.Rcode == dns.RcodeNameError {
+			return ErrInsecure
+		}
+
+		if len(dsMsg.Answer) == 0 {
+			return ErrInsecure
+		}
+
+		if err := verifyRRSIGs(dsMsg.Answer, trustedKeys); err != nil {
+			return fmt.Errorf("failed to verify DS RRset for %s: %w", nextZone, err)
+		}
+
+		trustedDS = extractDSs(dsMsg.Answer)
+		if len(trustedDS) == 0 {
+			return ErrInsecure
 		}
 	}
 
-	// fmt.Printf("Validating final answer for %s\n", finalMsg.Question[0].Name)
 	return verifyRRSIGs(finalMsg.Answer, trustedKeys)
 }
 
@@ -172,18 +204,20 @@ func (r *Resolver) validateZone(ctx context.Context, zone string, parentDS []*dn
 	if err != nil {
 		return nil, fmt.Errorf("could not get DNSKEY for %s: %w", zone, err)
 	}
+	if dnskeyMsg.Rcode != dns.RcodeSuccess {
+		return nil, fmt.Errorf("DNSKEY query for %s failed with rcode %s: %w", zone, dns.RcodeToString[dnskeyMsg.Rcode], ErrBogus)
+	}
 	keys := extractDNSKEYs(dnskeyMsg.Answer)
 	if len(keys) == 0 {
-		return nil, fmt.Errorf("no DNSKEY records found for %s", zone)
+		return nil, fmt.Errorf("no DNSKEY records found for supposedly signed zone %s: %w", zone, ErrBogus)
 	}
 
 	var trustedKSK *dns.DNSKEY
 	for _, key := range keys {
-		if (key.Flags&dns.ZONE) != 0 && (key.Flags&dns.SEP) != 0 {
+		if (key.Flags&dns.ZONE) != 0 && (key.Flags&dns.SEP) != 0 { // KSK
 			ds := key.ToDS(dns.SHA256)
 			for _, anchor := range parentDS {
-				if strings.ToUpper(ds.Digest) == strings.ToUpper(anchor.Digest) && ds.KeyTag == anchor.KeyTag {
-					// fmt.Printf("Found matching DS for KSK %d in zone %s\n", key.KeyTag(), zone)
+				if ds != nil && strings.ToUpper(ds.Digest) == strings.ToUpper(anchor.Digest) && ds.KeyTag == anchor.KeyTag {
 					trustedKSK = key
 					break
 				}
@@ -195,14 +229,13 @@ func (r *Resolver) validateZone(ctx context.Context, zone string, parentDS []*dn
 	}
 
 	if trustedKSK == nil {
-		return nil, fmt.Errorf("could not find a trusted KSK for zone %s", zone)
+		return nil, fmt.Errorf("could not find a trusted KSK for zone %s: %w", zone, ErrBogus)
 	}
 
 	if err := verifyRRSIGs(dnskeyMsg.Answer, []*dns.DNSKEY{trustedKSK}); err != nil {
 		return nil, fmt.Errorf("failed to verify DNSKEY RRset for %s: %w", zone, err)
 	}
 
-	// fmt.Printf("Successfully validated DNSKEY RRset for %s\n", zone)
 	return keys, nil
 }
 
@@ -235,11 +268,10 @@ func verifyRRSIGs(records []dns.RR, keys []*dns.DNSKEY) error {
 	}
 
 	if len(sigs) == 0 {
-		// It's ok if there are no signatures for DNSKEY RRset at the root
 		if len(rrset) > 0 && rrset[0].Header().Rrtype == dns.TypeDNSKEY && rrset[0].Header().Name == "." {
 			return nil
 		}
-		return fmt.Errorf("no RRSIGs found in the record set")
+		return fmt.Errorf("no RRSIGs found in record set: %w", ErrBogus)
 	}
 
 	for _, sig := range sigs {
@@ -249,13 +281,12 @@ func verifyRRSIGs(records []dns.RR, keys []*dns.DNSKEY) error {
 		for _, key := range keys {
 			if key.KeyTag() == sig.KeyTag && key.Header().Name == sig.SignerName {
 				if err := sig.Verify(key, rrset); err == nil {
-					// fmt.Printf("RRSIG for %s validated with key %d.\n", dns.TypeToString[sig.TypeCovered], key.KeyTag())
 					return nil
 				}
 			}
 		}
 	}
-	return fmt.Errorf("failed to verify any RRSIG")
+	return fmt.Errorf("failed to verify any RRSIG: %w", ErrBogus)
 }
 
 func extractDSs(records []dns.RR) []*dns.DS {
