@@ -14,7 +14,6 @@ type CacheEntry struct {
 	Expiry          time.Time
 	IsNegative      bool
 	DNSSECValidated bool
-	LastAccess      time.Time // For LRU eviction
 }
 
 // Shard is a part of the ShardedCache, protected by a mutex.
@@ -41,7 +40,9 @@ func NewShardedCache(numShards int, cleanupInterval time.Duration) *ShardedCache
 	for i := 0; i < numShards; i++ {
 		shards[i] = &Shard{
 			entries: make(map[string]CacheEntry),
-			maxEntries: 1000, // Example: max 1000 entries per shard
+			// A reasonable default limit to prevent unbounded growth.
+			// This should be configurable in a real-world scenario.
+			maxEntries: 10000,
 		}
 	}
 	cache := &ShardedCache{
@@ -59,18 +60,13 @@ func NewShardedCache(numShards int, cleanupInterval time.Duration) *ShardedCache
 func (c *ShardedCache) Get(key string) (*dns.Msg, bool, bool, bool) {
 	shard := c.getShard(key)
 	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+
 	entry, found := shard.entries[key]
-	shard.mu.RUnlock()
 
 	if !found || time.Now().After(entry.Expiry) {
 		return nil, false, false, false
 	}
-
-	// Update LastAccess for LRU
-	shard.mu.Lock()
-	entry.LastAccess = time.Now()
-	shard.entries[key] = entry
-	shard.mu.Unlock()
 
 	return entry.Msg, true, entry.IsNegative, entry.DNSSECValidated
 }
@@ -81,19 +77,12 @@ func (c *ShardedCache) Set(key string, msg *dns.Msg, ttl time.Duration, isNegati
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	// Implement LRU eviction if shard is full
+	// Prevent unbounded cache growth. If the shard is full,
+	// we drop the new entry. The periodic cleanup will clear space.
+	// A more sophisticated eviction strategy could be used here if needed.
 	if len(shard.entries) >= shard.maxEntries {
-		var oldestKey string
-		var oldestTime time.Time
-		for k, e := range shard.entries {
-			if oldestKey == "" || e.LastAccess.Before(oldestTime) {
-				oldestKey = k
-				oldestTime = e.LastAccess
-			}
-		}
-		if oldestKey != "" {
-			delete(shard.entries, oldestKey)
-		}
+		// Optional: log that we are dropping the entry due to a full cache.
+		return
 	}
 
 	shard.entries[key] = CacheEntry{
@@ -101,7 +90,6 @@ func (c *ShardedCache) Set(key string, msg *dns.Msg, ttl time.Duration, isNegati
 		Expiry:          time.Now().Add(ttl),
 		IsNegative:      isNegative,
 		DNSSECValidated: dnssecValidated,
-		LastAccess:      time.Now(),
 	}
 }
 
