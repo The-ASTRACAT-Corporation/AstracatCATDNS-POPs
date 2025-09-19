@@ -5,7 +5,10 @@ import (
 	"flag"
 	"log"
 	"net"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/miekg/dns"
@@ -124,7 +127,9 @@ func (j *DnsJob) Execute() {
 		m := new(dns.Msg)
 		m.SetRcode(j.req, dns.RcodeServerFailure)
 		j.w.WriteMsg(m)
-		j.shardedCache.Set(cacheKey, m, 30*time.Second, true, false)
+		if j.shardedCache.config.NegativeCacheEnabled {
+			j.shardedCache.Set(cacheKey, m, 30*time.Second, true, false)
+		}
 		return
 	}
 
@@ -143,11 +148,20 @@ func (j *DnsJob) Execute() {
 	}
 
 	dnssecValidated := result.Msg.AuthenticatedData
-	if !dnssecValidated {
-		ttl = 5 * time.Second
+	if dnssecValidated {
+		// Enforce MinTTL
+		if int(ttl.Seconds()) < j.shardedCache.config.MinTTLSecs {
+			ttl = time.Duration(j.shardedCache.config.MinTTLSecs) * time.Second
+		}
+
+		isNegative := result.Msg.Rcode != dns.RcodeSuccess
+		if !isNegative {
+			j.shardedCache.Set(cacheKey, result.Msg, ttl, false, dnssecValidated)
+		} else if j.shardedCache.config.NegativeCacheEnabled {
+			j.shardedCache.Set(cacheKey, result.Msg, ttl, true, dnssecValidated)
+		}
 	}
 
-	j.shardedCache.Set(cacheKey, result.Msg, ttl, false, dnssecValidated)
 	j.w.WriteMsg(result.Msg)
 }
 
@@ -157,8 +171,11 @@ func main() {
 		workers       = flag.Int("workers", 100, "Number of worker goroutines")
 		queueSize     = flag.Int("queue-size", 1000, "Size of the job queue")
 		cacheShards   = flag.Int("cache-shards", defaultShards, "Number of cache shards")
-		rateLimitRPS  = flag.Int("rate-limit-rps", 10, "Rate limit: requests per second per IP")
-		rateLimitBurst = flag.Int("rate-limit-burst", 20, "Rate limit: burst size per IP")
+		rateLimitRPS         = flag.Int("rate-limit-rps", 10, "Rate limit: requests per second per IP")
+		rateLimitBurst       = flag.Int("rate-limit-burst", 20, "Rate limit: burst size per IP")
+		cacheMaxEntries      = flag.Int("cache-max-entries", 10000, "Cache: maximum number of entries per shard")
+		cacheMinTTLSecs      = flag.Int("cache-min-ttl-secs", 30, "Cache: minimum TTL in seconds")
+		cacheNegativeEnabled = flag.Bool("cache-negative-enabled", true, "Cache: enable negative caching")
 	)
 	flag.Parse()
 
@@ -167,7 +184,12 @@ func main() {
 		// fmt.Println("Query: " + s)
 	}
 
-	shardedCache := NewShardedCache(*cacheShards, 1*time.Minute)
+	cacheConfig := CacheConfig{
+		MaxEntries:           *cacheMaxEntries,
+		MinTTLSecs:           *cacheMinTTLSecs,
+		NegativeCacheEnabled: *cacheNegativeEnabled,
+	}
+	shardedCache := NewShardedCache(*cacheShards, 1*time.Minute, cacheConfig)
 	defer shardedCache.Stop()
 
 	workerPool := NewWorkerPool(*workers, *queueSize)
