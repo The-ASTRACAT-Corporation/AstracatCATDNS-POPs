@@ -1,6 +1,7 @@
 package main
 
 import (
+	"container/list"
 	"hash/fnv"
 	"sync"
 	"time"
@@ -12,11 +13,14 @@ import (
 type CacheConfig struct {
 	MaxEntries           int
 	MinTTLSecs           int
+	MaxTTLSecs           int
 	NegativeCacheEnabled bool
+	NegativeTTLSecs      int
 }
 
 // CacheEntry represents a single entry in the cache.
 type CacheEntry struct {
+	Key             string
 	Msg             *dns.Msg
 	Expiry          time.Time
 	IsNegative      bool
@@ -25,7 +29,8 @@ type CacheEntry struct {
 
 // Shard is a part of the ShardedCache, protected by a mutex.
 type Shard struct {
-	entries    map[string]CacheEntry
+	entries    map[string]*list.Element
+	lruList    *list.List
 	mu         sync.RWMutex
 	maxEntries int // Maximum number of entries in this shard
 }
@@ -47,7 +52,8 @@ func NewShardedCache(numShards int, cleanupInterval time.Duration, config CacheC
 	shards := make([]*Shard, numShards)
 	for i := 0; i < numShards; i++ {
 		shards[i] = &Shard{
-			entries:    make(map[string]CacheEntry),
+			entries:    make(map[string]*list.Element),
+			lruList:    list.New(),
 			maxEntries: config.MaxEntries,
 		}
 	}
@@ -66,15 +72,20 @@ func NewShardedCache(numShards int, cleanupInterval time.Duration, config CacheC
 // Get retrieves a DNS message from the cache.
 func (c *ShardedCache) Get(key string) (*dns.Msg, bool, bool, bool) {
 	shard := c.getShard(key)
-	shard.mu.RLock()
-	defer shard.mu.RUnlock()
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
-	entry, found := shard.entries[key]
-
-	if !found || time.Now().After(entry.Expiry) {
+	element, found := shard.entries[key]
+	if !found {
 		return nil, false, false, false
 	}
 
+	entry := element.Value.(*CacheEntry)
+	if time.Now().After(entry.Expiry) {
+		return nil, false, false, false
+	}
+
+	shard.lruList.MoveToFront(element)
 	return entry.Msg, true, entry.IsNegative, entry.DNSSECValidated
 }
 
@@ -84,20 +95,33 @@ func (c *ShardedCache) Set(key string, msg *dns.Msg, ttl time.Duration, isNegati
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	// Prevent unbounded cache growth. If the shard is full,
-	// we drop the new entry. The periodic cleanup will clear space.
-	// A more sophisticated eviction strategy could be used here if needed.
-	if len(shard.entries) >= shard.maxEntries {
-		// Optional: log that we are dropping the entry due to a full cache.
+	if element, found := shard.entries[key]; found {
+		entry := element.Value.(*CacheEntry)
+		entry.Msg = msg
+		entry.Expiry = time.Now().Add(ttl)
+		entry.IsNegative = isNegative
+		entry.DNSSECValidated = dnssecValidated
+		shard.lruList.MoveToFront(element)
 		return
 	}
 
-	shard.entries[key] = CacheEntry{
+	if shard.lruList.Len() >= shard.maxEntries && shard.maxEntries > 0 {
+		element := shard.lruList.Back()
+		if element != nil {
+			entry := shard.lruList.Remove(element).(*CacheEntry)
+			delete(shard.entries, entry.Key)
+		}
+	}
+
+	entry := &CacheEntry{
+		Key:             key,
 		Msg:             msg,
 		Expiry:          time.Now().Add(ttl),
 		IsNegative:      isNegative,
 		DNSSECValidated: dnssecValidated,
 	}
+	element := shard.lruList.PushFront(entry)
+	shard.entries[key] = element
 }
 
 // Stop stops the background cleanup goroutines.
@@ -129,9 +153,16 @@ func (s *Shard) cleanup(interval time.Duration, stop <-chan struct{}) {
 		case <-ticker.C:
 			s.mu.Lock()
 			now := time.Now()
-			for key, entry := range s.entries {
+			// Iterate backwards from the least recently used, as they are most likely to be expired.
+			for element := s.lruList.Back(); element != nil; element = element.Prev() {
+				entry := element.Value.(*CacheEntry)
 				if now.After(entry.Expiry) {
-					delete(s.entries, key)
+					s.lruList.Remove(element)
+					delete(s.entries, entry.Key)
+				} else {
+					// Since the list is ordered by access time, we can stop
+					// once we find a non-expired item.
+					break
 				}
 			}
 			s.mu.Unlock()
