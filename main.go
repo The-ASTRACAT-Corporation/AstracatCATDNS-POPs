@@ -212,14 +212,50 @@ func main() {
 		workerPool.Submit(job)
 	})
 
-	server := &dns.Server{
-		Addr:    *port,
-		Net:     "udp",
-		UDPSize: 65535,
+	var wg sync.WaitGroup
+
+	// Create listeners. Listening on ":port" will bind to all available IP addresses,
+	// including both IPv4 and IPv6, on most modern operating systems.
+	packetConn, err := net.ListenPacket("udp", *port)
+	if err != nil {
+		log.Fatalf("Failed to create UDP listener: %v", err)
+	}
+	listener, err := net.Listen("tcp", *port)
+	if err != nil {
+		log.Fatalf("Failed to create TCP listener: %v", err)
 	}
 
-	log.Printf("Starting DNS resolver on %s", *port)
-	if err := server.ListenAndServe(); err != nil {
-		log.Fatalf("Failed to start server: %v", err)
-	}
+	// --- UDP Server ---
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		server := &dns.Server{PacketConn: packetConn, UDPSize: 65535}
+		log.Printf("Starting UDP DNS resolver on %s", packetConn.LocalAddr())
+		if err := server.ActivateAndServe(); err != nil {
+			log.Printf("UDP server error: %v", err)
+		}
+	}()
+
+	// --- TCP Server ---
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		server := &dns.Server{Listener: listener}
+		log.Printf("Starting TCP DNS resolver on %s", listener.Addr())
+		if err := server.ActivateAndServe(); err != nil {
+			log.Printf("TCP server error: %v", err)
+		}
+	}()
+
+	// Graceful shutdown
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	<-sig
+
+	log.Println("Shutting down servers...")
+	packetConn.Close()
+	listener.Close()
+
+	wg.Wait()
+	log.Println("Servers stopped.")
 }
