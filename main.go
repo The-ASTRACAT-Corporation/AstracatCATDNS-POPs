@@ -29,7 +29,7 @@ type RateLimiter struct {
 }
 
 type visitor struct {
-	tokens  int
+	tokens   int
 	lastSeen time.Time
 }
 
@@ -56,7 +56,6 @@ func (rl *RateLimiter) Allow(ip string) bool {
 		return true
 	}
 
-	// Refill tokens based on elapsed time.
 	elapsed := time.Since(v.lastSeen)
 	tokensToAdd := int(elapsed.Seconds() * float64(rl.rps))
 	if tokensToAdd > 0 {
@@ -91,106 +90,56 @@ func (rl *RateLimiter) startCleanup() {
 }
 
 type DnsJob struct {
-	w            dns.ResponseWriter
-	req          *dns.Msg
-	shardedCache *ShardedCache
-	r            *resolver.Resolver
+	w   dns.ResponseWriter
+	req *dns.Msg
+	cr  *CachingResolver
 }
 
 func (j *DnsJob) Execute() {
-	// Generate a cache key from the DNS question
-	cacheKey := j.req.Question[0].Name + ":" + dns.TypeToString[j.req.Question[0].Qtype]
-
-	// Try to get the response from cache
-	if cachedMsg, found, isNegative, _ := j.shardedCache.Get(cacheKey); found {
-		if isNegative {
-			log.Printf("Cache HIT (negative) for %s", cacheKey)
-			m := new(dns.Msg)
-			m.SetRcode(j.req, dns.RcodeServerFailure)
-			j.w.WriteMsg(m)
-			return
-		} else {
-			log.Printf("Cache HIT (positive) for %s", cacheKey)
-			cachedMsg.Id = j.req.Id
-			j.w.WriteMsg(cachedMsg)
-			return
-		}
-	}
-	log.Printf("Cache MISS for %s", cacheKey)
-	msg := new(dns.Msg)
-	msg.SetQuestion(j.req.Question[0].Name, j.req.Question[0].Qtype)
-	msg.SetEdns0(4096, true)
-
-	result := j.r.Exchange(context.Background(), msg)
-	if result.Err != nil {
-		log.Printf("Error exchanging DNS query: %v", result.Err)
+	resp, err := j.cr.Exchange(context.Background(), j.req)
+	if err != nil {
+		log.Printf("Error resolving query: %v", err)
 		m := new(dns.Msg)
 		m.SetRcode(j.req, dns.RcodeServerFailure)
 		j.w.WriteMsg(m)
-		if j.shardedCache.config.NegativeCacheEnabled {
-			j.shardedCache.Set(cacheKey, m, 30*time.Second, true, false)
-		}
 		return
 	}
 
-	result.Msg.SetRcode(j.req, result.Msg.Rcode)
-	result.Msg.RecursionAvailable = true
-
-	ttl := 60 * time.Second
-	if len(result.Msg.Answer) > 0 {
-		minTTL := result.Msg.Answer[0].Header().Ttl
-		for _, rr := range result.Msg.Answer {
-			if rr.Header().Ttl < minTTL {
-				minTTL = rr.Header().Ttl
-			}
-		}
-		ttl = time.Duration(minTTL) * time.Second
-	}
-
-	dnssecValidated := result.Msg.AuthenticatedData
-	if dnssecValidated {
-		// Enforce MinTTL
-		if int(ttl.Seconds()) < j.shardedCache.config.MinTTLSecs {
-			ttl = time.Duration(j.shardedCache.config.MinTTLSecs) * time.Second
-		}
-
-		isNegative := result.Msg.Rcode != dns.RcodeSuccess
-		if !isNegative {
-			j.shardedCache.Set(cacheKey, result.Msg, ttl, false, dnssecValidated)
-		} else if j.shardedCache.config.NegativeCacheEnabled {
-			j.shardedCache.Set(cacheKey, result.Msg, ttl, true, dnssecValidated)
-		}
-	}
-
-	j.w.WriteMsg(result.Msg)
+	j.w.WriteMsg(resp)
 }
 
 func main() {
 	var (
-		port          = flag.String("port", ":5053", "Port to listen on")
-		workers       = flag.Int("workers", 100, "Number of worker goroutines")
-		queueSize     = flag.Int("queue-size", 1000, "Size of the job queue")
-		cacheShards   = flag.Int("cache-shards", defaultShards, "Number of cache shards")
+		port                 = flag.String("port", ":5053", "Port to listen on")
+		workers              = flag.Int("workers", 100, "Number of worker goroutines")
+		queueSize            = flag.Int("queue-size", 1000, "Size of the job queue")
+		cacheShards          = flag.Int("cache-shards", defaultShards, "Number of cache shards")
 		rateLimitRPS         = flag.Int("rate-limit-rps", 10, "Rate limit: requests per second per IP")
 		rateLimitBurst       = flag.Int("rate-limit-burst", 20, "Rate limit: burst size per IP")
 		cacheMaxEntries      = flag.Int("cache-max-entries", 10000, "Cache: maximum number of entries per shard")
-		cacheMinTTLSecs      = flag.Int("cache-min-ttl-secs", 30, "Cache: minimum TTL in seconds")
+		cacheMinTTLSecs      = flag.Int("cache-min-ttl-secs", 60, "Cache: minimum TTL in seconds")
+		cacheMaxTTLSecs      = flag.Int("cache-max-ttl-secs", 86400, "Cache: maximum TTL in seconds")
 		cacheNegativeEnabled = flag.Bool("cache-negative-enabled", true, "Cache: enable negative caching")
+		cacheNegativeTTLSecs = flag.Int("cache-negative-ttl-secs", 60, "Cache: TTL for negative responses in seconds")
 	)
 	flag.Parse()
 
 	resolver.Query = func(s string) {
-		// Quiet mode, uncomment for verbose query logging
-		// fmt.Println("Query: " + s)
+		// Quiet mode
 	}
 
 	cacheConfig := CacheConfig{
 		MaxEntries:           *cacheMaxEntries,
 		MinTTLSecs:           *cacheMinTTLSecs,
+		MaxTTLSecs:           *cacheMaxTTLSecs,
 		NegativeCacheEnabled: *cacheNegativeEnabled,
+		NegativeTTLSecs:      *cacheNegativeTTLSecs,
 	}
 	shardedCache := NewShardedCache(*cacheShards, 1*time.Minute, cacheConfig)
 	defer shardedCache.Stop()
+
+	baseResolver := resolver.NewResolver()
+	cachingResolver := NewCachingResolver(shardedCache, baseResolver)
 
 	workerPool := NewWorkerPool(*workers, *queueSize)
 	workerPool.Start()
@@ -198,46 +147,40 @@ func main() {
 
 	rateLimiter := NewRateLimiter(*rateLimitRPS, *rateLimitBurst, 3*time.Minute)
 
-	r := resolver.NewResolver()
-
 	dns.HandleFunc(".", func(w dns.ResponseWriter, req *dns.Msg) {
-		// --- Security and Resilience Enhancements ---
-		ip, _, _ := net.SplitHostPort(w.RemoteAddr().String())
-		if !rateLimiter.Allow(ip) {
-			log.Printf("Rate limit exceeded for IP: %s", ip)
-			return // Just drop the request
-		}
-
 		if len(req.Question) == 0 {
-			log.Println("Received request with no questions")
 			m := new(dns.Msg)
 			m.SetRcode(req, dns.RcodeFormatError)
 			w.WriteMsg(m)
 			return
 		}
 
-		if req.Question[0].Qtype == dns.TypeANY {
-			log.Printf("Refusing ANY query from %s for %s", ip, req.Question[0].Name)
+		ip, _, _ := net.SplitHostPort(w.RemoteAddr().String())
+		if !rateLimiter.Allow(ip) {
+			log.Printf("Rate limit exceeded for IP: %s", ip)
 			m := new(dns.Msg)
 			m.SetRcode(req, dns.RcodeRefused)
 			w.WriteMsg(m)
 			return
 		}
-		// --- End Enhancements ---
+
+		if req.Question[0].Qtype == dns.TypeANY {
+			m := new(dns.Msg)
+			m.SetRcode(req, dns.RcodeRefused)
+			w.WriteMsg(m)
+			return
+		}
 
 		job := &DnsJob{
-			w:            w,
-			req:          req,
-			shardedCache: shardedCache,
-			r:            r,
+			w:   w,
+			req: req,
+			cr:  cachingResolver,
 		}
 		workerPool.Submit(job)
 	})
 
 	var wg sync.WaitGroup
 
-	// Create listeners. Listening on ":port" will bind to all available IP addresses,
-	// including both IPv4 and IPv6, on most modern operating systems.
 	packetConn, err := net.ListenPacket("udp", *port)
 	if err != nil {
 		log.Fatalf("Failed to create UDP listener: %v", err)
@@ -247,29 +190,24 @@ func main() {
 		log.Fatalf("Failed to create TCP listener: %v", err)
 	}
 
-	// --- UDP Server ---
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		server := &dns.Server{PacketConn: packetConn, UDPSize: 65535}
-		log.Printf("Starting UDP DNS resolver on %s", packetConn.LocalAddr())
 		if err := server.ActivateAndServe(); err != nil {
 			log.Printf("UDP server error: %v", err)
 		}
 	}()
 
-	// --- TCP Server ---
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		server := &dns.Server{Listener: listener}
-		log.Printf("Starting TCP DNS resolver on %s", listener.Addr())
 		if err := server.ActivateAndServe(); err != nil {
 			log.Printf("TCP server error: %v", err)
 		}
 	}()
 
-	// Graceful shutdown
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	<-sig
