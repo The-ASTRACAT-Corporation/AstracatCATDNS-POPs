@@ -8,6 +8,13 @@ import (
 	"github.com/miekg/dns"
 )
 
+// CacheConfig holds configuration for the cache.
+type CacheConfig struct {
+	MaxEntries           int
+	MinTTLSecs           int
+	NegativeCacheEnabled bool
+}
+
 // CacheEntry represents a single entry in the cache.
 type CacheEntry struct {
 	Msg             *dns.Msg
@@ -25,30 +32,30 @@ type Shard struct {
 
 // ShardedCache implements a sharded, in-memory cache for DNS responses.
 type ShardedCache struct {
-	shards    []*Shard
-	numShards uint32
-	stop      chan struct{}
+	shards          []*Shard
+	numShards       uint32
+	config          CacheConfig
+	stop            chan struct{}
 	cleanupInterval time.Duration
 }
 
 // NewShardedCache creates a new ShardedCache with the specified number of shards.
-func NewShardedCache(numShards int, cleanupInterval time.Duration) *ShardedCache {
+func NewShardedCache(numShards int, cleanupInterval time.Duration, config CacheConfig) *ShardedCache {
 	if numShards <= 0 {
 		numShards = defaultShards
 	}
 	shards := make([]*Shard, numShards)
 	for i := 0; i < numShards; i++ {
 		shards[i] = &Shard{
-			entries: make(map[string]CacheEntry),
-			// A reasonable default limit to prevent unbounded growth.
-			// This should be configurable in a real-world scenario.
-			maxEntries: 10000,
+			entries:    make(map[string]CacheEntry),
+			maxEntries: config.MaxEntries,
 		}
 	}
 	cache := &ShardedCache{
-		shards:    shards,
-		numShards: uint32(numShards),
-		stop:      make(chan struct{}),
+		shards:          shards,
+		numShards:       uint32(numShards),
+		config:          config,
+		stop:            make(chan struct{}),
 		cleanupInterval: cleanupInterval,
 	}
 
