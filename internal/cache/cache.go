@@ -10,7 +10,7 @@ import (
 
 	"container/list"
 	"github.com/miekg/dns"
-	"dns-resolver/internal/resolver"
+	"dns-resolver/internal/interfaces"
 )
 
 const (
@@ -56,7 +56,7 @@ type Cache struct {
 	// Prefetch related fields
 	prefetchInterval time.Duration
 	stopPrefetch chan struct{}
-	resolver resolver.CacheResolver // Reference to the resolver for prefetching
+	resolver interfaces.CacheResolver // Reference to the resolver for prefetching
 }
 
 // NewCache creates and returns a new Cache.
@@ -93,7 +93,7 @@ func NewCache(size int, numShards int, prefetchInterval time.Duration) *Cache {
 }
 
 // SetResolver sets the resolver instance for the cache to use for prefetching.
-func (c *Cache) SetResolver(r resolver.CacheResolver) {
+func (c *Cache) SetResolver(r interfaces.CacheResolver) {
 	c.resolver = r
 	go c.runPrefetcher()
 }
