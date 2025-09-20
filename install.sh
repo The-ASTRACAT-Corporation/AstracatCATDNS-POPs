@@ -1,12 +1,12 @@
 #!/bin/bash
-
-# Exit immediately if a command exits with a non-zero status.
 set -e
 
-PROJECT_DIR=$(dirname "$0")
+# Получаем абсолютный путь к директории скрипта
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$SCRIPT_DIR"
 SERVICE_NAME="astracat-dns"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-BINARY_PATH="${PROJECT_DIR}/${SERVICE_NAME}"
+BINARY_PATH="$PROJECT_DIR/$SERVICE_NAME"
 
 echo "🚀 Starting installation of Astracat DNS Resolver..."
 
@@ -16,31 +16,29 @@ if ! command -v go &> /dev/null; then
     exit 1
 fi
 
-echo "📁 Project directory: ${PROJECT_DIR}"
+echo "📁 Project directory: $PROJECT_DIR"
 cd "$PROJECT_DIR"
 
 echo "🔨 Building the project..."
-go build -o "${SERVICE_NAME}" .
+go build -o "$SERVICE_NAME" .
 
-# Проверяем, что бинарник создался
-if [ ! -f "${BINARY_PATH}" ]; then
-    echo "❌ Build failed: binary not found at ${BINARY_PATH}"
+if [ ! -f "$BINARY_PATH" ]; then
+    echo "❌ Build failed: binary not found at $BINARY_PATH"
     exit 1
 fi
 
-echo "✅ Build successful: ${BINARY_PATH}"
+echo "✅ Build successful: $BINARY_PATH"
 
-echo "📝 Creating systemd service file: ${SERVICE_FILE}..."
+echo "📝 Creating systemd service file: $SERVICE_FILE..."
 
-# Генерируем unit-файл без логов в journald
-cat > "${SERVICE_FILE}" <<EOF
+cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Astracat DNS Resolver Service
 After=network.target
 
 [Service]
-ExecStart=${BINARY_PATH}
-WorkingDirectory=${PROJECT_DIR}
+ExecStart=$BINARY_PATH
+WorkingDirectory=$PROJECT_DIR
 Restart=always
 User=root
 StandardOutput=null
@@ -54,8 +52,8 @@ EOF
 echo "🔄 Reloading systemd daemon..."
 systemctl daemon-reload
 
-echo "🔌 Enabling and starting the ${SERVICE_NAME} service..."
-systemctl enable "${SERVICE_NAME}" --now
+echo "🔌 Enabling and starting the $SERVICE_NAME service..."
+systemctl enable "$SERVICE_NAME" --now
 
-echo "🎉 Installation complete! The ${SERVICE_NAME} service is now running."
+echo "🎉 Installation complete! The $SERVICE_NAME service is now running."
 echo "✅ Systemd logs are disabled for this service."
