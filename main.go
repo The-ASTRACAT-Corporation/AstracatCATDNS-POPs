@@ -29,15 +29,16 @@ func main() {
 
 	var (
 		port                 = flag.String("port", ":5053", "Port to listen on")
-		concurrency          = flag.Int("concurrency", 100, "Number of concurrent resolutions")
-		cacheShards          = flag.Int("cache-shards", 32, "Number of cache shards")
-		rateLimitRPS         = flag.Int("rate-limit-rps", 10, "Rate limit: requests per second per IP")
-		rateLimitBurst       = flag.Int("rate-limit-burst", 20, "Rate limit: burst size per IP")
+		concurrency          = flag.Int("concurrency", 500, "Number of concurrent resolutions")
+		cacheShards          = flag.Int("cache-shards", 256, "Number of cache shards")
+		rateLimitRPS         = flag.Int("rate-limit-rps", 1000, "Rate limit: requests per second per IP")
+		rateLimitBurst       = flag.Int("rate-limit-burst", 2000, "Rate limit: burst size per IP")
 		cacheMaxEntries      = flag.Int("cache-max-entries", 10000, "Cache: maximum number of entries per shard")
 		cacheMinTTLSecs      = flag.Int("cache-min-ttl-secs", 60, "Cache: minimum TTL in seconds")
 		cacheMaxTTLSecs      = flag.Int("cache-max-ttl-secs", 86400, "Cache: maximum TTL in seconds")
 		cacheNegativeEnabled = flag.Bool("cache-negative-enabled", true, "Cache: enable negative caching")
 		cacheNegativeTTLSecs = flag.Int("cache-negative-ttl-secs", 60, "Cache: TTL for negative responses in seconds")
+		enableDnssec         = flag.Bool("dnssec", true, "Enable DNSSEC validation")
 	)
 	flag.Parse()
 
@@ -56,7 +57,7 @@ func main() {
 	recursionCache := cache.NewShardedCache(*cacheShards, 1*time.Minute, cacheConfig)
 	defer recursionCache.Stop()
 
-	baseResolver := resolver.NewResolver(recursionCache)
+	baseResolver := resolver.NewResolver(recursionCache, *enableDnssec)
 	cachingResolver := server.NewCachingResolver(shardedCache, baseResolver)
 
 	rateLimiter := server.NewRateLimiter(*rateLimitRPS, *rateLimitBurst, 3*time.Minute)
