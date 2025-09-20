@@ -1,7 +1,9 @@
 package main
 
 import (
-	"context"
+	"dns-resolver/internal/cache"
+	"dns-resolver/internal/resolver"
+	"dns-resolver/internal/server"
 	"flag"
 	"log"
 	"net"
@@ -12,108 +14,14 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-	"github.com/nsmithuk/resolver"
 )
-
-const (
-	defaultShards = 32 // Example: 32 shards
-)
-
-// RateLimiter stores request counts for IP addresses.
-type RateLimiter struct {
-	visitors map[string]*visitor
-	mu       sync.Mutex
-	rps      int           // requests per second
-	burst    int           // max burst size
-	cleanup  time.Duration // cleanup interval
-}
-
-type visitor struct {
-	tokens   int
-	lastSeen time.Time
-}
-
-// NewRateLimiter creates a new rate limiter.
-func NewRateLimiter(rps, burst int, cleanup time.Duration) *RateLimiter {
-	rl := &RateLimiter{
-		visitors: make(map[string]*visitor),
-		rps:      rps,
-		burst:    burst,
-		cleanup:  cleanup,
-	}
-	go rl.startCleanup()
-	return rl
-}
-
-// Allow checks if a request from a given IP is allowed.
-func (rl *RateLimiter) Allow(ip string) bool {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-
-	v, exists := rl.visitors[ip]
-	if !exists {
-		rl.visitors[ip] = &visitor{tokens: rl.burst - 1, lastSeen: time.Now()}
-		return true
-	}
-
-	elapsed := time.Since(v.lastSeen)
-	tokensToAdd := int(elapsed.Seconds() * float64(rl.rps))
-	if tokensToAdd > 0 {
-		v.tokens += tokensToAdd
-		v.lastSeen = time.Now()
-	}
-
-	if v.tokens > rl.burst {
-		v.tokens = rl.burst
-	}
-
-	if v.tokens > 0 {
-		v.tokens--
-		return true
-	}
-
-	return false
-}
-
-func (rl *RateLimiter) startCleanup() {
-	ticker := time.NewTicker(rl.cleanup)
-	for {
-		<-ticker.C
-		rl.mu.Lock()
-		for ip, v := range rl.visitors {
-			if time.Since(v.lastSeen) > rl.cleanup {
-				delete(rl.visitors, ip)
-			}
-		}
-		rl.mu.Unlock()
-	}
-}
-
-type DnsJob struct {
-	w   dns.ResponseWriter
-	req *dns.Msg
-	cr  *CachingResolver
-}
-
-func (j *DnsJob) Execute() {
-	resp, err := j.cr.Exchange(context.Background(), j.req)
-	if err != nil {
-		log.Printf("Error resolving query: %v", err)
-		m := new(dns.Msg)
-		m.SetRcode(j.req, dns.RcodeServerFailure)
-		j.w.WriteMsg(m)
-		return
-	}
-
-	j.w.WriteMsg(resp)
-}
 
 func main() {
 	var (
 		port                 = flag.String("port", ":5053", "Port to listen on")
 		workers              = flag.Int("workers", 100, "Number of worker goroutines")
 		queueSize            = flag.Int("queue-size", 1000, "Size of the job queue")
-		cacheShards          = flag.Int("cache-shards", defaultShards, "Number of cache shards")
+		cacheShards          = flag.Int("cache-shards", 32, "Number of cache shards")
 		rateLimitRPS         = flag.Int("rate-limit-rps", 10, "Rate limit: requests per second per IP")
 		rateLimitBurst       = flag.Int("rate-limit-burst", 20, "Rate limit: burst size per IP")
 		cacheMaxEntries      = flag.Int("cache-max-entries", 10000, "Cache: maximum number of entries per shard")
@@ -124,28 +32,27 @@ func main() {
 	)
 	flag.Parse()
 
-	resolver.Query = func(s string) {
-		// Quiet mode
-	}
-
-	cacheConfig := CacheConfig{
+	cacheConfig := cache.CacheConfig{
 		MaxEntries:           *cacheMaxEntries,
 		MinTTLSecs:           *cacheMinTTLSecs,
 		MaxTTLSecs:           *cacheMaxTTLSecs,
 		NegativeCacheEnabled: *cacheNegativeEnabled,
 		NegativeTTLSecs:      *cacheNegativeTTLSecs,
 	}
-	shardedCache := NewShardedCache(*cacheShards, 1*time.Minute, cacheConfig)
+	shardedCache := cache.NewShardedCache(*cacheShards, 1*time.Minute, cacheConfig)
 	defer shardedCache.Stop()
 
-	baseResolver := resolver.NewResolver()
-	cachingResolver := NewCachingResolver(shardedCache, baseResolver)
+	recursionCache := cache.NewShardedCache(*cacheShards, 1*time.Minute, cacheConfig)
+	defer recursionCache.Stop()
 
-	workerPool := NewWorkerPool(*workers, *queueSize)
+	baseResolver := resolver.NewResolver(recursionCache)
+	cachingResolver := server.NewCachingResolver(shardedCache, baseResolver)
+
+	workerPool := server.NewWorkerPool(*workers, *queueSize)
 	workerPool.Start()
 	defer workerPool.Stop()
 
-	rateLimiter := NewRateLimiter(*rateLimitRPS, *rateLimitBurst, 3*time.Minute)
+	rateLimiter := server.NewRateLimiter(*rateLimitRPS, *rateLimitBurst, 3*time.Minute)
 
 	dns.HandleFunc(".", func(w dns.ResponseWriter, req *dns.Msg) {
 		if len(req.Question) == 0 {
@@ -171,10 +78,10 @@ func main() {
 			return
 		}
 
-		job := &DnsJob{
-			w:   w,
-			req: req,
-			cr:  cachingResolver,
+		job := &server.DnsJob{
+			W:   w,
+			Req: req,
+			Cr:  cachingResolver,
 		}
 		workerPool.Submit(job)
 	})

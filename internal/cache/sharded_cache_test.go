@@ -1,6 +1,7 @@
-package main
+package cache_test
 
 import (
+	"dns-resolver/internal/cache"
 	"testing"
 	"time"
 
@@ -8,8 +9,8 @@ import (
 )
 
 func TestCacheSetGet(t *testing.T) {
-	config := CacheConfig{MaxEntries: 10}
-	cache := NewShardedCache(1, 1*time.Minute, config)
+	config := cache.CacheConfig{MaxEntries: 10}
+	cache := cache.NewShardedCache(1, 1*time.Minute, config)
 
 	msg := new(dns.Msg)
 	msg.SetQuestion("example.com.", dns.TypeA)
@@ -31,8 +32,8 @@ func TestCacheSetGet(t *testing.T) {
 }
 
 func TestCacheEviction(t *testing.T) {
-	config := CacheConfig{MaxEntries: 2}
-	cache := NewShardedCache(1, 1*time.Minute, config)
+	config := cache.CacheConfig{MaxEntries: 2}
+	cache := cache.NewShardedCache(1, 1*time.Minute, config)
 
 	msg1 := new(dns.Msg)
 	msg1.SetQuestion("example1.com.", dns.TypeA)
@@ -68,8 +69,8 @@ func TestCacheEviction(t *testing.T) {
 }
 
 func TestCacheExpiration(t *testing.T) {
-	config := CacheConfig{MaxEntries: 10}
-	cache := NewShardedCache(1, 5*time.Millisecond, config)
+	config := cache.CacheConfig{MaxEntries: 10}
+	cache := cache.NewShardedCache(1, 5*time.Millisecond, config)
 
 	msg := new(dns.Msg)
 	msg.SetQuestion("example.com.", dns.TypeA)

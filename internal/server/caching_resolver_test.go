@@ -1,10 +1,12 @@
-package main
+package server_test
 
 import (
 	"context"
+	"dns-resolver/internal/cache"
+	"dns-resolver/internal/resolver"
+	"dns-resolver/internal/server"
 	"fmt"
 	"github.com/miekg/dns"
-	"github.com/nsmithuk/resolver"
 	"net"
 	"testing"
 	"time"
@@ -56,9 +58,21 @@ func mockDNSServer(t *testing.T, handler mockHandler) (addr string, cleanup func
 	return l.LocalAddr().String(), cleanup
 }
 
+// mockResolver is a mock implementation of the resolver.Resolver for testing.
+type mockResolver struct {
+	exchangeFunc func(ctx context.Context, msg *dns.Msg) *resolver.Result
+}
+
+func (m *mockResolver) Exchange(ctx context.Context, msg *dns.Msg) *resolver.Result {
+	if m.exchangeFunc != nil {
+		return m.exchangeFunc(ctx, msg)
+	}
+	return &resolver.Result{Err: fmt.Errorf("mockResolver.Exchange not implemented")}
+}
+
 func TestCachingResolverCacheHit(t *testing.T) {
-	cacheConfig := CacheConfig{MaxEntries: 10}
-	shardedCache := NewShardedCache(1, 1*time.Minute, cacheConfig)
+	cacheConfig := cache.CacheConfig{MaxEntries: 10}
+	shardedCache := cache.NewShardedCache(1, 1*time.Minute, cacheConfig)
 
 	qname := "example.com."
 	qtype := dns.TypeA
@@ -71,8 +85,13 @@ func TestCachingResolverCacheHit(t *testing.T) {
 	shardedCache.Set(qname+":"+dns.TypeToString[qtype], msg, 60*time.Second, false, true)
 
 	// The underlying resolver should not be called.
-	baseResolver := resolver.NewResolver()
-	cachingResolver := NewCachingResolver(shardedCache, baseResolver)
+	baseResolver := &mockResolver{
+		exchangeFunc: func(ctx context.Context, msg *dns.Msg) *resolver.Result {
+			t.Fatal("Expected resolver.Exchange not to be called on cache hit")
+			return nil
+		},
+	}
+	cachingResolver := server.NewCachingResolver(shardedCache, baseResolver)
 
 	req := new(dns.Msg)
 	req.SetQuestion(qname, qtype)
@@ -91,51 +110,46 @@ func TestCachingResolverCacheHit(t *testing.T) {
 }
 
 func TestCachingResolverCacheMiss(t *testing.T) {
-	qname := "test.local."
+	qname := "example.com."
+	qtype := dns.TypeA
+	cacheConfig := cache.CacheConfig{MaxEntries: 10, MinTTLSecs: 1}
+	shardedCache := cache.NewShardedCache(1, 1*time.Minute, cacheConfig)
 
-	// Need to create a custom resolver that points to our mock server.
-	// The library doesn't seem to support this easily.
-	// This test is therefore limited. We will test the caching part,
-	// but we can't easily test the interaction with the resolver.
-	// For now, we assume the resolver works and test that our cache
-	// logic around it is correct.
+	// Mock resolver returns a successful response.
+	mockResp := new(dns.Msg)
+	mockResp.SetQuestion(qname, qtype)
+	rr, _ := dns.NewRR(qname + " 60 IN A 1.2.3.4")
+	mockResp.Answer = append(mockResp.Answer, rr)
 
-	cacheConfig := CacheConfig{MaxEntries: 10, MinTTLSecs: 1, NegativeCacheEnabled: true, NegativeTTLSecs: 1}
-	shardedCache := NewShardedCache(1, 1*time.Minute, cacheConfig)
-
-	// We can't direct the resolver to our mock server.
-	// So we can't test the full cache miss path.
-	// We can only test that if we call Exchange, the result gets cached.
-
-	// This highlights a limitation in the testability of the external resolver library.
-	// A more robust solution would involve an interface for the resolver,
-	// allowing for a mock resolver in tests.
-
-	// Since we can't mock the resolver's destination, we'll test a different aspect:
-	// that a call to the real resolver (which will likely fail for a .local domain)
-	// results in a negative cache entry.
-
-	baseResolver := resolver.NewResolver()
-	cachingResolver := NewCachingResolver(shardedCache, baseResolver)
+	baseResolver := &mockResolver{
+		exchangeFunc: func(ctx context.Context, msg *dns.Msg) *resolver.Result {
+			return &resolver.Result{Msg: mockResp}
+		},
+	}
+	cachingResolver := server.NewCachingResolver(shardedCache, baseResolver)
 
 	req := new(dns.Msg)
-	req.SetQuestion(qname, dns.TypeA)
+	req.SetQuestion(qname, qtype)
 
 	resp, err := cachingResolver.Exchange(context.Background(), req)
 	if err != nil {
 		t.Fatalf("Expected no error from exchange, got %v", err)
 	}
-	if resp.Rcode == dns.RcodeSuccess {
-		t.Errorf("Expected a non-success Rcode, got %s", dns.RcodeToString[resp.Rcode])
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("Expected a success Rcode, got %s", dns.RcodeToString[resp.Rcode])
 	}
 
-	cacheKey := qname + ":" + dns.TypeToString[dns.TypeA]
-	_, found, isNegative, _ := shardedCache.Get(cacheKey)
+	// Verify that the response is now in the cache.
+	cacheKey := qname + ":" + dns.TypeToString[qtype]
+	cachedMsg, found, isNegative, _ := shardedCache.Get(cacheKey)
 
 	if !found {
-		t.Fatal("Expected to find a negative cache entry after failed resolution")
+		t.Fatal("Expected to find a cache entry after resolution")
 	}
-	if !isNegative {
-		t.Error("Expected the cache entry to be negative")
+	if isNegative {
+		t.Error("Expected the cache entry not to be negative")
+	}
+	if len(cachedMsg.Answer) != 1 {
+		t.Fatalf("Expected 1 answer record in cached message, got %d", len(cachedMsg.Answer))
 	}
 }

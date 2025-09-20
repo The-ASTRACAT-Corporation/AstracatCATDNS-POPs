@@ -1,21 +1,21 @@
-package main
+package server
 
 import (
 	"context"
+	"dns-resolver/internal/cache"
 	"github.com/miekg/dns"
-	"github.com/nsmithuk/resolver"
 	"log"
 	"time"
 )
 
 // CachingResolver wraps a resolver to add a caching layer.
 type CachingResolver struct {
-	cache    *ShardedCache
-	resolver *resolver.Resolver
+	cache    *cache.ShardedCache
+	resolver ResolverInterface
 }
 
 // NewCachingResolver creates a new CachingResolver.
-func NewCachingResolver(cache *ShardedCache, resolver *resolver.Resolver) *CachingResolver {
+func NewCachingResolver(cache *cache.ShardedCache, resolver ResolverInterface) *CachingResolver {
 	return &CachingResolver{
 		cache:    cache,
 		resolver: resolver,
@@ -48,8 +48,8 @@ func (r *CachingResolver) Exchange(ctx context.Context, msg *dns.Msg) (*dns.Msg,
 	result := r.resolver.Exchange(ctx, upstreamMsg)
 	if result.Err != nil {
 		log.Printf("Error exchanging DNS query: %v", result.Err)
-		if r.cache.config.NegativeCacheEnabled {
-			ttl := time.Duration(r.cache.config.NegativeTTLSecs) * time.Second
+		if r.cache.Config.NegativeCacheEnabled {
+			ttl := time.Duration(r.cache.Config.NegativeTTLSecs) * time.Second
 			r.cache.Set(cacheKey, nil, ttl, true, false)
 		}
 		return nil, result.Err
@@ -67,7 +67,7 @@ func (r *CachingResolver) Exchange(ctx context.Context, msg *dns.Msg) (*dns.Msg,
 	// A future improvement would be to ensure DNSSEC validation is robust and only cache validated data.
 	if !isNegative {
 		r.cache.Set(cacheKey, result.Msg, ttl, false, true)
-	} else if r.cache.config.NegativeCacheEnabled {
+	} else if r.cache.Config.NegativeCacheEnabled {
 		r.cache.Set(cacheKey, result.Msg, ttl, true, true)
 	}
 
@@ -85,10 +85,10 @@ func (r *CachingResolver) getTTL(msg *dns.Msg, isNegative bool) time.Duration {
 			}
 		}
 		if ttl == 0 {
-			return time.Duration(r.cache.config.NegativeTTLSecs) * time.Second
+			return time.Duration(r.cache.Config.NegativeTTLSecs) * time.Second
 		}
-		if r.cache.config.NegativeTTLSecs > 0 && ttl > uint32(r.cache.config.NegativeTTLSecs) {
-			ttl = uint32(r.cache.config.NegativeTTLSecs)
+		if r.cache.Config.NegativeTTLSecs > 0 && ttl > uint32(r.cache.Config.NegativeTTLSecs) {
+			ttl = uint32(r.cache.Config.NegativeTTLSecs)
 		}
 	} else if len(msg.Answer) > 0 {
 		ttl = msg.Answer[0].Header().Ttl
@@ -98,14 +98,14 @@ func (r *CachingResolver) getTTL(msg *dns.Msg, isNegative bool) time.Duration {
 			}
 		}
 	} else {
-		return time.Duration(r.cache.config.MinTTLSecs) * time.Second
+		return time.Duration(r.cache.Config.MinTTLSecs) * time.Second
 	}
 
-	if r.cache.config.MinTTLSecs > 0 && ttl < uint32(r.cache.config.MinTTLSecs) {
-		ttl = uint32(r.cache.config.MinTTLSecs)
+	if r.cache.Config.MinTTLSecs > 0 && ttl < uint32(r.cache.Config.MinTTLSecs) {
+		ttl = uint32(r.cache.Config.MinTTLSecs)
 	}
-	if r.cache.config.MaxTTLSecs > 0 && ttl > uint32(r.cache.config.MaxTTLSecs) {
-		ttl = uint32(r.cache.config.MaxTTLSecs)
+	if r.cache.Config.MaxTTLSecs > 0 && ttl > uint32(r.cache.Config.MaxTTLSecs) {
+		ttl = uint32(r.cache.Config.MaxTTLSecs)
 	}
 
 	return time.Duration(ttl) * time.Second

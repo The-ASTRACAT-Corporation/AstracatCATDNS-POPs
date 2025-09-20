@@ -1,4 +1,4 @@
-package main
+package cache
 
 import (
 	"container/list"
@@ -7,6 +7,10 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+)
+
+const (
+	defaultShards = 32 // Example: 32 shards
 )
 
 // CacheConfig holds configuration for the cache.
@@ -39,7 +43,7 @@ type Shard struct {
 type ShardedCache struct {
 	shards          []*Shard
 	numShards       uint32
-	config          CacheConfig
+	Config          CacheConfig
 	stop            chan struct{}
 	cleanupInterval time.Duration
 }
@@ -60,7 +64,7 @@ func NewShardedCache(numShards int, cleanupInterval time.Duration, config CacheC
 	cache := &ShardedCache{
 		shards:          shards,
 		numShards:       uint32(numShards),
-		config:          config,
+		Config:          config,
 		stop:            make(chan struct{}),
 		cleanupInterval: cleanupInterval,
 	}
