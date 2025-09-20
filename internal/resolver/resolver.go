@@ -80,6 +80,9 @@ func (r *Resolver) lookup(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 	q := req.Question[0]
 	nsAddrs := rootServers
 
+	// Explicitly disable DNSSEC by setting the DO bit to false.
+	req.SetEdns0(4096, false)
+
 	for {
 		select {
 		case <-ctx.Done():
