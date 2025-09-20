@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"dns-resolver/internal/cache"
 	"dns-resolver/internal/resolver"
 	"dns-resolver/internal/server"
 	"flag"
 	"log"
 	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"sync"
@@ -17,10 +20,16 @@ import (
 )
 
 func main() {
+	go func() {
+		log.Println("Starting pprof server on :6060")
+		if err := http.ListenAndServe("localhost:6060", nil); err != nil {
+			log.Fatalf("pprof server failed: %v", err)
+		}
+	}()
+
 	var (
 		port                 = flag.String("port", ":5053", "Port to listen on")
-		workers              = flag.Int("workers", 100, "Number of worker goroutines")
-		queueSize            = flag.Int("queue-size", 1000, "Size of the job queue")
+		concurrency          = flag.Int("concurrency", 100, "Number of concurrent resolutions")
 		cacheShards          = flag.Int("cache-shards", 32, "Number of cache shards")
 		rateLimitRPS         = flag.Int("rate-limit-rps", 10, "Rate limit: requests per second per IP")
 		rateLimitBurst       = flag.Int("rate-limit-burst", 20, "Rate limit: burst size per IP")
@@ -31,6 +40,8 @@ func main() {
 		cacheNegativeTTLSecs = flag.Int("cache-negative-ttl-secs", 60, "Cache: TTL for negative responses in seconds")
 	)
 	flag.Parse()
+
+	semaphore := make(chan struct{}, *concurrency)
 
 	cacheConfig := cache.CacheConfig{
 		MaxEntries:           *cacheMaxEntries,
@@ -47,10 +58,6 @@ func main() {
 
 	baseResolver := resolver.NewResolver(recursionCache)
 	cachingResolver := server.NewCachingResolver(shardedCache, baseResolver)
-
-	workerPool := server.NewWorkerPool(*workers, *queueSize)
-	workerPool.Start()
-	defer workerPool.Stop()
 
 	rateLimiter := server.NewRateLimiter(*rateLimitRPS, *rateLimitBurst, 3*time.Minute)
 
@@ -78,12 +85,20 @@ func main() {
 			return
 		}
 
-		job := &server.DnsJob{
-			W:   w,
-			Req: req,
-			Cr:  cachingResolver,
-		}
-		workerPool.Submit(job)
+		go func() {
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			resp, err := cachingResolver.Exchange(context.Background(), req)
+			if err != nil {
+				log.Printf("Error resolving query: %v", err)
+				m := new(dns.Msg)
+				m.SetRcode(req, dns.RcodeServerFailure)
+				w.WriteMsg(m)
+				return
+			}
+			w.WriteMsg(resp)
+		}()
 	})
 
 	var wg sync.WaitGroup

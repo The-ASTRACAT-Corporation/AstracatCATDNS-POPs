@@ -1,9 +1,6 @@
 package server
 
 import (
-	"context"
-	"github.com/miekg/dns"
-	"log"
 	"sync"
 	"time"
 )
@@ -76,23 +73,4 @@ func (rl *RateLimiter) startCleanup() {
 		}
 		rl.mu.Unlock()
 	}
-}
-
-type DnsJob struct {
-	W   dns.ResponseWriter
-	Req *dns.Msg
-	Cr  *CachingResolver
-}
-
-func (j *DnsJob) Execute() {
-	resp, err := j.Cr.Exchange(context.Background(), j.Req)
-	if err != nil {
-		log.Printf("Error resolving query: %v", err)
-		m := new(dns.Msg)
-		m.SetRcode(j.Req, dns.RcodeServerFailure)
-		j.W.WriteMsg(m)
-		return
-	}
-
-	j.W.WriteMsg(resp)
 }
