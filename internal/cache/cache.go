@@ -10,7 +10,7 @@ import (
 
 	"container/list"
 	"github.com/miekg/dns"
-	"github.com/astracat/dns-resolver/internal/resolver"
+	"dns-resolver/internal/resolver"
 )
 
 const (
