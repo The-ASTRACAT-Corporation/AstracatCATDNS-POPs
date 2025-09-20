@@ -1,44 +1,67 @@
 package server
 
 import (
+	"hash/fnv"
 	"sync"
 	"time"
 )
 
-// RateLimiter stores request counts for IP addresses.
-type RateLimiter struct {
-	visitors map[string]*visitor
-	mu       sync.Mutex
-	rps      int           // requests per second
-	burst    int           // max burst size
-	cleanup  time.Duration // cleanup interval
-}
+const numShards = 32
 
 type visitor struct {
 	tokens   int
 	lastSeen time.Time
 }
 
-// NewRateLimiter creates a new rate limiter.
+type rateLimiterShard struct {
+	visitors map[string]*visitor
+	mu       sync.Mutex
+}
+
+// RateLimiter stores request counts for IP addresses in a sharded map.
+type RateLimiter struct {
+	shards   []*rateLimiterShard
+	rps      int           // requests per second
+	burst    int           // max burst size
+	cleanup  time.Duration // cleanup interval
+	stop     chan struct{}
+}
+
+// NewRateLimiter creates a new sharded rate limiter.
 func NewRateLimiter(rps, burst int, cleanup time.Duration) *RateLimiter {
+	shards := make([]*rateLimiterShard, numShards)
+	for i := 0; i < numShards; i++ {
+		shards[i] = &rateLimiterShard{
+			visitors: make(map[string]*visitor),
+		}
+	}
+
 	rl := &RateLimiter{
-		visitors: make(map[string]*visitor),
+		shards:   shards,
 		rps:      rps,
 		burst:    burst,
 		cleanup:  cleanup,
+		stop:     make(chan struct{}),
 	}
 	go rl.startCleanup()
 	return rl
 }
 
+func (rl *RateLimiter) getShard(ip string) *rateLimiterShard {
+	h := fnv.New32a()
+	h.Write([]byte(ip))
+	return rl.shards[int(h.Sum32())%numShards]
+}
+
 // Allow checks if a request from a given IP is allowed.
 func (rl *RateLimiter) Allow(ip string) bool {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
+	shard := rl.getShard(ip)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
-	v, exists := rl.visitors[ip]
+	v, exists := shard.visitors[ip]
 	if !exists {
-		rl.visitors[ip] = &visitor{tokens: rl.burst - 1, lastSeen: time.Now()}
+		shard.visitors[ip] = &visitor{tokens: rl.burst - 1, lastSeen: time.Now()}
 		return true
 	}
 
@@ -63,14 +86,32 @@ func (rl *RateLimiter) Allow(ip string) bool {
 
 func (rl *RateLimiter) startCleanup() {
 	ticker := time.NewTicker(rl.cleanup)
+	defer ticker.Stop()
+
 	for {
-		<-ticker.C
-		rl.mu.Lock()
-		for ip, v := range rl.visitors {
-			if time.Since(v.lastSeen) > rl.cleanup {
-				delete(rl.visitors, ip)
+		select {
+		case <-ticker.C:
+			for _, shard := range rl.shards {
+				go rl.cleanupShard(shard)
 			}
+		case <-rl.stop:
+			return
 		}
-		rl.mu.Unlock()
 	}
+}
+
+func (rl *RateLimiter) cleanupShard(shard *rateLimiterShard) {
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
+	for ip, v := range shard.visitors {
+		if time.Since(v.lastSeen) > rl.cleanup {
+			delete(shard.visitors, ip)
+		}
+	}
+}
+
+// Stop stops the cleanup goroutine.
+func (rl *RateLimiter) Stop() {
+	close(rl.stop)
 }
