@@ -7,6 +7,7 @@ import (
 	"github.com/miekg/dns"
 	"net"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -38,12 +39,13 @@ type Result struct {
 
 // Resolver - это рекурсивный DNS-резолвер.
 type Resolver struct {
-	Cache *cache.ShardedCache
+	Cache         *cache.ShardedCache
+	DNSSECEnabled bool
 }
 
 // NewResolver создает новый резолвер.
 func NewResolver(cache *cache.ShardedCache) *Resolver {
-	return &Resolver{Cache: cache}
+	return &Resolver{Cache: cache, DNSSECEnabled: true}
 }
 
 // Exchange выполняет DNS-запрос и DNSSEC-валидацию.
@@ -56,15 +58,16 @@ func (r *Resolver) Exchange(ctx context.Context, msg *dns.Msg) *Result {
 		return &Result{Err: err}
 	}
 
-	// DNSSEC validation is disabled
-	// err = r.validate(ctx, finalMsg)
-	// if err != nil {
-	// 	fmt.Printf("DNSSEC validation failed: %v\n", err)
-	// 	return &Result{Err: fmt.Errorf("DNSSEC validation failed: %w", err)}
-	// }
-	//
-	// fmt.Println("DNSSEC validation successful!")
-	// finalMsg.AuthenticatedData = true
+	if r.DNSSECEnabled {
+		err = r.validate(ctx, finalMsg)
+		if err != nil {
+			fmt.Printf("DNSSEC validation failed: %v\n", err)
+			return &Result{Err: fmt.Errorf("DNSSEC validation failed: %w", err)}
+		}
+
+		fmt.Println("DNSSEC validation successful!")
+		finalMsg.AuthenticatedData = true
+	}
 	finalMsg.Id = msg.Id
 	return &Result{Msg: finalMsg}
 }
@@ -174,13 +177,23 @@ func (r *Resolver) validate(ctx context.Context, finalMsg *dns.Msg) error {
 
 		if i > 0 {
 			nextZone := zones[i-1]
-			dsMsg, err := r.resolve(ctx, nextZone, dns.TypeDS)
-			if err != nil {
-				return fmt.Errorf("could not get DS for %s: %w", nextZone, err)
+			var dsMsg *dns.Msg
+			var err error
+			cacheKey := nextZone + ":DS"
+			if cached, found, _, validated := r.Cache.Get(cacheKey); found && validated {
+				dsMsg = cached
+			} else {
+				dsMsg, err = r.resolve(ctx, nextZone, dns.TypeDS)
+				if err != nil {
+					return fmt.Errorf("could not get DS for %s: %w", nextZone, err)
+				}
+				// We only cache after successful verification of the DS record.
 			}
+
 			if err := verifyRRSIGs(dsMsg.Answer, trustedKeys); err != nil {
 				return fmt.Errorf("failed to verify DS RRset for %s: %w", nextZone, err)
 			}
+			r.Cache.Set(cacheKey, dsMsg, 1*time.Hour, false, true)
 			trustedDS = extractDSs(dsMsg.Answer)
 			if len(trustedDS) == 0 {
 				// This can happen for zones that are not signed.
@@ -197,6 +210,11 @@ func (r *Resolver) validate(ctx context.Context, finalMsg *dns.Msg) error {
 }
 
 func (r *Resolver) validateZone(ctx context.Context, zone string, parentDS []*dns.DS) ([]*dns.DNSKEY, error) {
+	cacheKey := zone + ":DNSKEY"
+	if cachedMsg, found, _, validated := r.Cache.Get(cacheKey); found && validated {
+		return extractDNSKEYs(cachedMsg.Answer), nil
+	}
+
 	dnskeyMsg, err := r.resolve(ctx, zone, dns.TypeDNSKEY)
 	if err != nil {
 		return nil, fmt.Errorf("could not get DNSKEY for %s: %w", zone, err)
@@ -230,6 +248,8 @@ func (r *Resolver) validateZone(ctx context.Context, zone string, parentDS []*dn
 	if err := verifyRRSIGs(dnskeyMsg.Answer, []*dns.DNSKEY{trustedKSK}); err != nil {
 		return nil, fmt.Errorf("failed to verify DNSKEY RRset for %s: %w", zone, err)
 	}
+
+	r.Cache.Set(cacheKey, dnskeyMsg, 1*time.Hour, false, true)
 
 	// fmt.Printf("Successfully validated DNSKEY RRset for %s\n", zone)
 	return keys, nil
@@ -329,70 +349,95 @@ func (r *Resolver) extractNS(ctx context.Context, resp *dns.Msg) ([]string, []st
 		}
 	}
 
+	resolvedNS := make(map[string]bool)
 	for _, rr := range resp.Extra {
 		if a, ok := rr.(*dns.A); ok {
 			for _, nsName := range nsNames {
 				if a.Header().Name == nsName {
 					nsAddrs = append(nsAddrs, a.A.String())
+					resolvedNS[nsName] = true
+				}
+			}
+		}
+		if aaaa, ok := rr.(*dns.AAAA); ok {
+			for _, nsName := range nsNames {
+				if aaaa.Header().Name == nsName {
+					nsAddrs = append(nsAddrs, aaaa.AAAA.String())
+					resolvedNS[nsName] = true
 				}
 			}
 		}
 	}
 
-	if len(nsAddrs) < len(nsNames) {
-		for _, nsName := range nsNames {
-			isResolved := false
-			for _, rr := range resp.Extra {
-				if a, ok := rr.(*dns.A); ok && a.Header().Name == nsName {
-					isResolved = true
-					break
-				}
-			}
-			if !isResolved {
-				// Check cache for A record
-				cacheKey := nsName + ":A"
-				if cachedMsg, found, _, _ := r.Cache.Get(cacheKey); found {
+	var toResolve []string
+	for _, nsName := range nsNames {
+		if !resolvedNS[nsName] {
+			toResolve = append(toResolve, nsName)
+		}
+	}
+
+	if len(toResolve) > 0 {
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		semaphore := make(chan struct{}, 4) // Limit concurrency to 4
+
+		for _, nsName := range toResolve {
+			wg.Add(1)
+			go func(nsName string) {
+				defer wg.Done()
+				semaphore <- struct{}{}
+				defer func() { <-semaphore }()
+
+				// Resolve A record
+				cacheKeyA := nsName + ":A"
+				if cachedMsg, found, _, _ := r.Cache.Get(cacheKeyA); found {
+					mu.Lock()
 					for _, ans := range cachedMsg.Answer {
 						if a, ok := ans.(*dns.A); ok {
 							nsAddrs = append(nsAddrs, a.A.String())
 						}
 					}
-					continue
+					mu.Unlock()
+				} else {
+					nsResp, err := r.resolve(ctx, nsName, dns.TypeA)
+					if err == nil {
+						r.Cache.Set(cacheKeyA, nsResp, 1*time.Hour, false, false)
+						mu.Lock()
+						for _, ans := range nsResp.Answer {
+							if a, ok := ans.(*dns.A); ok {
+								nsAddrs = append(nsAddrs, a.A.String())
+							}
+						}
+						mu.Unlock()
+					}
 				}
 
-				// fmt.Printf("Resolving NS %s\n", nsName)
-				nsResp, err := r.resolve(ctx, nsName, dns.TypeA)
-				if err == nil {
-					// Cache the A record
-					r.Cache.Set(cacheKey, nsResp, 1*time.Hour, false, false)
-					for _, ans := range nsResp.Answer {
-						if a, ok := ans.(*dns.A); ok {
-							nsAddrs = append(nsAddrs, a.A.String())
-						}
-					}
-				}
-				// Check cache for AAAA record
-				cacheKey = nsName + ":AAAA"
-				if cachedMsg, found, _, _ := r.Cache.Get(cacheKey); found {
+				// Resolve AAAA record
+				cacheKeyAAAA := nsName + ":AAAA"
+				if cachedMsg, found, _, _ := r.Cache.Get(cacheKeyAAAA); found {
+					mu.Lock()
 					for _, ans := range cachedMsg.Answer {
-						if a, ok := ans.(*dns.AAAA); ok {
-							nsAddrs = append(nsAddrs, a.AAAA.String())
+						if aaaa, ok := ans.(*dns.AAAA); ok {
+							nsAddrs = append(nsAddrs, aaaa.AAAA.String())
 						}
 					}
-					continue
-				}
-				nsResp, err = r.resolve(ctx, nsName, dns.TypeAAAA)
-				if err == nil {
-					// Cache the AAAA record
-					r.Cache.Set(cacheKey, nsResp, 1*time.Hour, false, false)
-					for _, ans := range nsResp.Answer {
-						if a, ok := ans.(*dns.AAAA); ok {
-							nsAddrs = append(nsAddrs, a.AAAA.String())
+					mu.Unlock()
+				} else {
+					nsResp, err := r.resolve(ctx, nsName, dns.TypeAAAA)
+					if err == nil {
+						r.Cache.Set(cacheKeyAAAA, nsResp, 1*time.Hour, false, false)
+						mu.Lock()
+						for _, ans := range nsResp.Answer {
+							if aaaa, ok := ans.(*dns.AAAA); ok {
+								nsAddrs = append(nsAddrs, aaaa.AAAA.String())
+							}
 						}
+						mu.Unlock()
 					}
 				}
-			}
+			}(nsName)
 		}
+		wg.Wait()
 	}
 
 	if len(nsAddrs) == 0 {

@@ -60,6 +60,7 @@ func main() {
 	cachingResolver := server.NewCachingResolver(shardedCache, baseResolver)
 
 	rateLimiter := server.NewRateLimiter(*rateLimitRPS, *rateLimitBurst, 3*time.Minute)
+	defer rateLimiter.Stop()
 
 	dns.HandleFunc(".", func(w dns.ResponseWriter, req *dns.Msg) {
 		if len(req.Question) == 0 {

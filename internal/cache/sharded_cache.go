@@ -76,21 +76,33 @@ func NewShardedCache(numShards int, cleanupInterval time.Duration, config CacheC
 // Get retrieves a DNS message from the cache.
 func (c *ShardedCache) Get(key string) (*dns.Msg, bool, bool, bool) {
 	shard := c.getShard(key)
-	shard.mu.Lock()
-	defer shard.mu.Unlock()
+	shard.mu.RLock()
 
 	element, found := shard.entries[key]
 	if !found {
+		shard.mu.RUnlock()
 		return nil, false, false, false
 	}
 
 	entry := element.Value.(*CacheEntry)
 	if time.Now().After(entry.Expiry) {
+		shard.mu.RUnlock()
 		return nil, false, false, false
 	}
 
-	shard.lruList.MoveToFront(element)
-	return entry.Msg, true, entry.IsNegative, entry.DNSSECValidated
+	msg := entry.Msg
+	isNegative := entry.IsNegative
+	dnssecValidated := entry.DNSSECValidated
+	shard.mu.RUnlock()
+
+	shard.mu.Lock()
+	// Re-check existence, as the entry might have been removed in the meantime.
+	if element, found := shard.entries[key]; found {
+		shard.lruList.MoveToFront(element)
+	}
+	shard.mu.Unlock()
+
+	return msg, true, isNegative, dnssecValidated
 }
 
 // Set adds a DNS message to the cache.
@@ -155,21 +167,31 @@ func (s *Shard) cleanup(interval time.Duration, stop <-chan struct{}) {
 	for {
 		select {
 		case <-ticker.C:
-			s.mu.Lock()
+			var keysToDelete []string
+			s.mu.RLock()
 			now := time.Now()
-			// Iterate backwards from the least recently used, as they are most likely to be expired.
 			for element := s.lruList.Back(); element != nil; element = element.Prev() {
 				entry := element.Value.(*CacheEntry)
 				if now.After(entry.Expiry) {
-					s.lruList.Remove(element)
-					delete(s.entries, entry.Key)
+					keysToDelete = append(keysToDelete, entry.Key)
 				} else {
-					// Since the list is ordered by access time, we can stop
-					// once we find a non-expired item.
 					break
 				}
 			}
-			s.mu.Unlock()
+			s.mu.RUnlock()
+
+			if len(keysToDelete) > 0 {
+				s.mu.Lock()
+				for _, key := range keysToDelete {
+					if element, found := s.entries[key]; found {
+						if time.Now().After(element.Value.(*CacheEntry).Expiry) {
+							s.lruList.Remove(element)
+							delete(s.entries, key)
+						}
+					}
+				}
+				s.mu.Unlock()
+			}
 		case <-stop:
 			return
 		}
