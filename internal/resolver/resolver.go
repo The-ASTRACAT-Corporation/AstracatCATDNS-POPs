@@ -122,12 +122,12 @@ func (r *Resolver) lookup(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 		}
 
 		if len(resp.Answer) > 0 {
-			r.cache.Set(cache.Key(q), resp, r.config.StaleWhileRevalidate, r.config.Prefetch)
+			r.cache.Set(cache.Key(q), resp, r.config.StaleWhileRevalidate, r.config.PrefetchInterval)
 			return resp, nil
 		}
 
 		if resp.Rcode == dns.RcodeNameError {
-			r.cache.Set(cache.Key(q), resp, r.config.StaleWhileRevalidate, r.config.Prefetch)
+			r.cache.Set(cache.Key(q), resp, r.config.StaleWhileRevalidate, r.config.PrefetchInterval)
 			return resp, nil
 		}
 
@@ -160,7 +160,7 @@ func (r *Resolver) lookup(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 					}
 					// Cache the NS record's A record
 					if len(nsResp.Answer) > 0 {
-						r.cache.Set(cache.Key(nsReq.Question[0]), nsResp, r.config.StaleWhileRevalidate, r.config.Prefetch)
+						r.cache.Set(cache.Key(nsReq.Question[0]), nsResp, r.config.StaleWhileRevalidate, r.config.PrefetchInterval)
 					}
 				}
 
