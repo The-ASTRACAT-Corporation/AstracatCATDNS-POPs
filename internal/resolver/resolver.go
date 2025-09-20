@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"context"
+	"dns-resolver/internal/cache"
 	"fmt"
 	"github.com/miekg/dns"
 	"net"
@@ -36,11 +37,13 @@ type Result struct {
 }
 
 // Resolver - это рекурсивный DNS-резолвер.
-type Resolver struct{}
+type Resolver struct {
+	Cache *cache.ShardedCache
+}
 
 // NewResolver создает новый резолвер.
-func NewResolver() *Resolver {
-	return &Resolver{}
+func NewResolver(cache *cache.ShardedCache) *Resolver {
+	return &Resolver{Cache: cache}
 }
 
 // Exchange выполняет DNS-запрос и DNSSEC-валидацию.
@@ -53,21 +56,26 @@ func (r *Resolver) Exchange(ctx context.Context, msg *dns.Msg) *Result {
 		return &Result{Err: err}
 	}
 
-	err = r.validate(ctx, finalMsg)
-	if err != nil {
-		fmt.Printf("DNSSEC validation failed: %v\n", err)
-		return &Result{Err: fmt.Errorf("DNSSEC validation failed: %w", err)}
-	}
-
-	fmt.Println("DNSSEC validation successful!")
-	finalMsg.AuthenticatedData = true
+	// DNSSEC validation is disabled
+	// err = r.validate(ctx, finalMsg)
+	// if err != nil {
+	// 	fmt.Printf("DNSSEC validation failed: %v\n", err)
+	// 	return &Result{Err: fmt.Errorf("DNSSEC validation failed: %w", err)}
+	// }
+	//
+	// fmt.Println("DNSSEC validation successful!")
+	// finalMsg.AuthenticatedData = true
 	finalMsg.Id = msg.Id
 	return &Result{Msg: finalMsg}
 }
 
 // resolve - основная логика рекурсивного разрешения.
 func (r *Resolver) resolve(ctx context.Context, qname string, qtype uint16) (*dns.Msg, error) {
-	nsAddrs := getRootNSAddrs()
+	nsAddrs, err := r.findNS(ctx, qname)
+	if err != nil {
+		return nil, err
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -102,10 +110,17 @@ func (r *Resolver) resolve(ctx context.Context, qname string, qtype uint16) (*dn
 		}
 
 		if len(resp.Ns) > 0 {
+			zone := resp.Ns[0].Header().Name
 			_, nextAddrs, err := r.extractNS(ctx, resp)
 			if err != nil {
 				return nil, err
 			}
+
+			// Cache the NS records
+			cacheMsg := new(dns.Msg)
+			cacheMsg.Ns = resp.Ns
+			r.Cache.Set(zone+":NS", cacheMsg, 1*time.Hour, false, false)
+
 			nsAddrs = nextAddrs
 			continue
 		}
@@ -115,6 +130,20 @@ func (r *Resolver) resolve(ctx context.Context, qname string, qtype uint16) (*dn
 		}
 		return nil, fmt.Errorf("no answer or referral for %s, rcode: %s", qname, dns.RcodeToString[resp.Rcode])
 	}
+}
+
+func (r *Resolver) findNS(ctx context.Context, qname string) ([]string, error) {
+	zones := getZoneChain(qname)
+	for _, zone := range zones {
+		cacheKey := zone + ":NS"
+		if cachedMsg, found, _, _ := r.Cache.Get(cacheKey); found {
+			_, addrs, err := r.extractNS(ctx, cachedMsg)
+			if err == nil && len(addrs) > 0 {
+				return addrs, nil
+			}
+		}
+	}
+	return getRootNSAddrs(), nil
 }
 
 // validate - выполняет DNSSEC-валидацию ответа.
@@ -320,12 +349,45 @@ func (r *Resolver) extractNS(ctx context.Context, resp *dns.Msg) ([]string, []st
 				}
 			}
 			if !isResolved {
+				// Check cache for A record
+				cacheKey := nsName + ":A"
+				if cachedMsg, found, _, _ := r.Cache.Get(cacheKey); found {
+					for _, ans := range cachedMsg.Answer {
+						if a, ok := ans.(*dns.A); ok {
+							nsAddrs = append(nsAddrs, a.A.String())
+						}
+					}
+					continue
+				}
+
 				// fmt.Printf("Resolving NS %s\n", nsName)
 				nsResp, err := r.resolve(ctx, nsName, dns.TypeA)
 				if err == nil {
+					// Cache the A record
+					r.Cache.Set(cacheKey, nsResp, 1*time.Hour, false, false)
 					for _, ans := range nsResp.Answer {
 						if a, ok := ans.(*dns.A); ok {
 							nsAddrs = append(nsAddrs, a.A.String())
+						}
+					}
+				}
+				// Check cache for AAAA record
+				cacheKey = nsName + ":AAAA"
+				if cachedMsg, found, _, _ := r.Cache.Get(cacheKey); found {
+					for _, ans := range cachedMsg.Answer {
+						if a, ok := ans.(*dns.AAAA); ok {
+							nsAddrs = append(nsAddrs, a.AAAA.String())
+						}
+					}
+					continue
+				}
+				nsResp, err = r.resolve(ctx, nsName, dns.TypeAAAA)
+				if err == nil {
+					// Cache the AAAA record
+					r.Cache.Set(cacheKey, nsResp, 1*time.Hour, false, false)
+					for _, ans := range nsResp.Answer {
+						if a, ok := ans.(*dns.AAAA); ok {
+							nsAddrs = append(nsAddrs, a.AAAA.String())
 						}
 					}
 				}

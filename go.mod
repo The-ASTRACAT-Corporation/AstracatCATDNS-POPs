@@ -3,6 +3,7 @@ module dns-resolver
 go 1.23.2
 
 require (
+	github.com/davecgh/go-spew v1.1.1
 	github.com/miekg/dns v1.1.68
 	github.com/nsmithuk/resolver v0.0.0-20250623062907-a1d51ff98c12
 )

@@ -2,10 +2,11 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"dns-resolver/internal/cache"
+	"dns-resolver/internal/resolver"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/miekg/dns"
-	"github.com/nsmithuk/resolver"
+	"time"
 )
 
 // Resolver - ваша обертка вокруг библиотечного резолвера
@@ -15,13 +16,8 @@ type Resolver struct {
 
 // NewResolver создает новый экземпляр резолвера
 func NewResolver() *Resolver {
-	// Включаем логирование запросов (как в вашем коде)
-	resolver.Query = func(s string) {
-		fmt.Println("Query: " + s)
-	}
-	
 	return &Resolver{
-		r: resolver.NewResolver(),
+		r: resolver.NewResolver(cache.NewShardedCache(1, 1*time.Minute, cache.CacheConfig{})),
 	}
 }
 
