@@ -33,6 +33,8 @@ type CacheItem struct {
 	Prefetch time.Duration
 	// element is a reference to the list.Element in the LRU list for quick deletion/movement.
 	element *list.Element
+	// parentList is a reference to the list.List this item belongs to.
+	parentList *list.List
 }
 
 // slruSegment represents one segment of the SLRU cache.
@@ -148,7 +150,7 @@ func (c *Cache) performPrefetch(key string, q dns.Question) {
 		}
 
 		// Update the cache with the new response
-		c.Set(key, resp, c.resolver.GetConfig().StaleWhileRevalidate, c.resolver.GetConfig().Prefetch)
+		c.Set(key, resp, c.resolver.GetConfig().StaleWhileRevalidate, c.resolver.GetConfig().PrefetchInterval)
 		return resp, nil
 	})
 
@@ -229,10 +231,10 @@ func (c *Cache) Set(key string, msg *dns.Msg, swr, prefetch time.Duration) {
 		existingItem.Prefetch = prefetch
 		// Move to front of protected list
 		if existingItem.element != nil {
-			if existingItem.element.Container() == shard.probationList {
+			if existingItem.parentList == shard.probationList {
 				shard.probationList.Remove(existingItem.element)
 				shard.addProtected(key, existingItem)
-			} else if existingItem.element.Container() == shard.protectedList {
+			} else if existingItem.parentList == shard.protectedList {
 				shard.protectedList.MoveToFront(existingItem.element)
 			}
 		}
@@ -260,6 +262,7 @@ func (s *slruSegment) addProbation(key string, item *CacheItem) {
 		}
 	}
 	item.element = s.probationList.PushFront(key)
+	item.parentList = s.probationList
 	s.items[key] = item
 }
 
@@ -277,6 +280,7 @@ func (s *slruSegment) addProtected(key string, item *CacheItem) {
 		}
 	}
 	item.element = s.protectedList.PushFront(key)
+	item.parentList = s.protectedList
 	s.items[key] = item
 }
 
@@ -317,11 +321,11 @@ func (s *slruSegment) accessItem(item *CacheItem) {
 		return
 	}
 
-	if item.element.Container() == s.probationList {
+	if item.parentList == s.probationList {
 		// Item is in probation, move to protected.
 		s.probationList.Remove(item.element)
 		s.addProtected(item.element.Value.(string), item)
-	} else if item.element.Container() == s.protectedList {
+	} else if item.parentList == s.protectedList {
 		// Item is already in protected, move to front.
 		s.protectedList.MoveToFront(item.element)
 	}
