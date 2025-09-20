@@ -43,12 +43,14 @@ type Resolver struct {
 
 // NewResolver creates a new resolver instance.
 func NewResolver(cfg *config.Config, c *cache.Cache, wp *WorkerPool) *Resolver {
-	return &Resolver{
+	r := &Resolver{
 		config:     cfg,
 		cache:      c,
 		workerPool: wp,
 		sf:         singleflight.Group{},
 	}
+	c.SetResolver(r)
+	return r
 }
 
 // GetSingleflightGroup returns the singleflight.Group instance.
