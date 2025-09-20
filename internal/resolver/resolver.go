@@ -44,8 +44,8 @@ type Resolver struct {
 }
 
 // NewResolver создает новый резолвер.
-func NewResolver(cache *cache.ShardedCache) *Resolver {
-	return &Resolver{Cache: cache, DNSSECEnabled: true}
+func NewResolver(cache *cache.ShardedCache, dnssecEnabled bool) *Resolver {
+	return &Resolver{Cache: cache, DNSSECEnabled: dnssecEnabled}
 }
 
 // Exchange выполняет DNS-запрос и DNSSEC-валидацию.
@@ -55,6 +55,12 @@ func (r *Resolver) Exchange(ctx context.Context, msg *dns.Msg) *Result {
 
 	finalMsg, err := r.resolve(ctx, msg.Question[0].Name, msg.Question[0].Qtype)
 	if err != nil {
+		// If DNSSEC is disabled, we don't return an error on validation failure.
+		// Instead, we return the message with the AD bit unset.
+		if !r.DNSSECEnabled && finalMsg != nil {
+			finalMsg.AuthenticatedData = false
+			return &Result{Msg: finalMsg}
+		}
 		return &Result{Err: err}
 	}
 
@@ -62,12 +68,18 @@ func (r *Resolver) Exchange(ctx context.Context, msg *dns.Msg) *Result {
 		err = r.validate(ctx, finalMsg)
 		if err != nil {
 			fmt.Printf("DNSSEC validation failed: %v\n", err)
-			return &Result{Err: fmt.Errorf("DNSSEC validation failed: %w", err)}
+			// Return SERVFAIL if validation fails
+			servfail := new(dns.Msg)
+			servfail.SetRcode(msg, dns.RcodeServerFailure)
+			return &Result{Msg: servfail}
 		}
 
 		fmt.Println("DNSSEC validation successful!")
 		finalMsg.AuthenticatedData = true
+	} else {
+		finalMsg.AuthenticatedData = false
 	}
+
 	finalMsg.Id = msg.Id
 	return &Result{Msg: finalMsg}
 }
@@ -88,7 +100,7 @@ func (r *Resolver) resolve(ctx context.Context, qname string, qtype uint16) (*dn
 
 		req := new(dns.Msg)
 		req.SetQuestion(qname, qtype)
-		req.SetEdns0(4096, true)
+		req.SetEdns0(4096, r.DNSSECEnabled)
 
 		// fmt.Printf("Querying %s for %s, servers: %v\n", qname, dns.TypeToString[qtype], nsAddrs)
 		resp, err := r.queryAny(ctx, nsAddrs, req)

@@ -17,7 +17,9 @@ type Resolver struct {
 // NewResolver создает новый экземпляр резолвера
 func NewResolver() *Resolver {
 	return &Resolver{
-		r: resolver.NewResolver(cache.NewShardedCache(1, 1*time.Minute, cache.CacheConfig{})),
+		// NOTE: This is a simple test client, DNSSEC is hardcoded to true here.
+		// The main server in main.go uses a command-line flag.
+		r: resolver.NewResolver(cache.NewShardedCache(1, 1*time.Minute, cache.CacheConfig{}), true),
 	}
 }
 
