@@ -3,7 +3,7 @@
 # Exit immediately if a command exits with a non-zero status.
 set -e
 
-PROJECT_DIR="/app"
+PROJECT_DIR=$(dirname "$0")
 SERVICE_NAME="astracat-dns"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 BINARY_PATH="${PROJECT_DIR}/${SERVICE_NAME}"
@@ -11,7 +11,7 @@ BINARY_PATH="${PROJECT_DIR}/${SERVICE_NAME}"
 echo "🚀 Starting installation of Astracat DNS Resolver..."
 
 # Проверка наличия Go
-if [ ! -f "/usr/local/go/bin/go" ]; then
+if ! command -v go &> /dev/null; then
     echo "❌ Go is not installed. Please install Go first."
     exit 1
 fi
@@ -20,7 +20,7 @@ echo "📁 Project directory: ${PROJECT_DIR}"
 cd "$PROJECT_DIR"
 
 echo "🔨 Building the project..."
-/usr/local/go/bin/go build -o "${SERVICE_NAME}" .
+go build -o "${SERVICE_NAME}" .
 
 # Проверяем, что бинарник создался
 if [ ! -f "${BINARY_PATH}" ]; then

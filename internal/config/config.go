@@ -14,7 +14,7 @@ type Config struct {
 func NewConfig() *Config {
 	return &Config{
 		ListenAddr:      "0.0.0.0:5053",
-		UpstreamTimeout: 2 * time.Second,
+		UpstreamTimeout: 5 * time.Second,
 		RequestTimeout:  5 * time.Second,
 		MaxWorkers:      100,
 	}
