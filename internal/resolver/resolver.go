@@ -10,6 +10,7 @@ import (
 
 	"dns-resolver/internal/cache"
 	"dns-resolver/internal/config"
+
 	"github.com/miekg/dns"
 	"golang.org/x/sync/singleflight"
 )
@@ -17,19 +18,19 @@ import (
 // rootServers is a list of the IP addresses of the root DNS servers.
 // In a production system, this list would be managed more dynamically.
 var rootServers = []string{
-	"198.41.0.4:53",    // a.root-servers.net
-	"199.9.14.201:53",  // b.root-servers.net
-	"192.33.4.12:53",   // c.root-servers.net
-	"199.7.91.13:53",   // d.root-servers.net
-	"192.203.230.10:53",// e.root-servers.net
-	"192.5.5.241:53",   // f.root-servers.net
-	"192.112.36.4:53",  // g.root-servers.net
-	"198.97.190.53:53", // h.root-servers.net
-	"192.36.148.17:53", // i.root-servers.net
-	"192.58.128.30:53", // j.root-servers.net
-	"193.0.14.129:53",  // k.root-servers.net
-	"199.7.83.42:53",   // l.root-servers.net
-	"202.12.27.33:53",  // m.root-servers.net
+	"198.41.0.4:53",     // a.root-servers.net
+	"199.9.14.201:53",   // b.root-servers.net
+	"192.33.4.12:53",    // c.root-servers.net
+	"199.7.91.13:53",    // d.root-servers.net
+	"192.203.230.10:53", // e.root-servers.net
+	"192.5.5.241:53",    // f.root-servers.net
+	"192.112.36.4:53",   // g.root-servers.net
+	"198.97.190.53:53",  // h.root-servers.net
+	"192.36.148.17:53",  // i.root-servers.net
+	"192.58.128.30:53",  // j.root-servers.net
+	"193.0.14.129:53",   // k.root-servers.net
+	"199.7.83.42:53",    // l.root-servers.net
+	"202.12.27.33:53",   // m.root-servers.net
 }
 
 // Resolver is a recursive DNS resolver.
@@ -46,7 +47,18 @@ func NewResolver(cfg *config.Config, c *cache.Cache, wp *WorkerPool) *Resolver {
 		config:     cfg,
 		cache:      c,
 		workerPool: wp,
+		sf:         singleflight.Group{},
 	}
+}
+
+// GetSingleflightGroup returns the singleflight.Group instance.
+func (r *Resolver) GetSingleflightGroup() *singleflight.Group {
+	return &r.sf
+}
+
+// GetConfig returns the resolver's configuration.
+func (r *Resolver) GetConfig() *config.Config {
+	return r.config
 }
 
 // Resolve performs a recursive DNS lookup for a given request.
@@ -55,9 +67,23 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, error) 
 	key := cache.Key(q)
 
 	// Check the cache first.
-	if cachedMsg, found := r.cache.Get(key); found {
-		log.Printf("Cache hit for %s", q.Name)
+	if cachedMsg, found, revalidate := r.cache.Get(key); found {
+		log.Printf("Cache hit for %s (revalidate: %t)", q.Name, revalidate)
 		cachedMsg.Id = req.Id
+
+		if revalidate {
+			// Trigger a background revalidation
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), r.config.UpstreamTimeout)
+				defer cancel()
+				_, err, _ := r.sf.Do(key+"-revalidate", func() (interface{}, error) {
+					return r.lookup(ctx, req)
+				})
+				if err != nil {
+					log.Printf("Background revalidation failed for %s: %v", q.Name, err)
+				}
+			}()
+		}
 		return cachedMsg, nil
 	}
 
@@ -94,12 +120,12 @@ func (r *Resolver) lookup(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 		}
 
 		if len(resp.Answer) > 0 {
-			r.cache.Set(cache.Key(q), resp)
+			r.cache.Set(cache.Key(q), resp, r.config.StaleWhileRevalidate, r.config.Prefetch)
 			return resp, nil
 		}
 
 		if resp.Rcode == dns.RcodeNameError {
-			r.cache.Set(cache.Key(q), resp)
+			r.cache.Set(cache.Key(q), resp, r.config.StaleWhileRevalidate, r.config.Prefetch)
 			return resp, nil
 		}
 
@@ -118,11 +144,22 @@ func (r *Resolver) lookup(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 				nsReq.SetQuestion(ns, dns.TypeA)
 				nsReq.RecursionDesired = true
 
-				// Recursively resolve the NS
-				nsResp, err := r.Resolve(ctx, nsReq)
-				if err != nil {
-					log.Printf("Failed to resolve NS %s: %v", ns, err)
-					continue
+				var nsResp *dns.Msg
+				// Check cache for NS A record before resolving
+				if cachedNsMsg, found, _ := r.cache.Get(cache.Key(nsReq.Question[0])); found {
+					nsResp = cachedNsMsg
+				} else {
+					// Recursively resolve the NS
+					var err error
+					nsResp, err = r.Resolve(ctx, nsReq)
+					if err != nil {
+						log.Printf("Failed to resolve NS %s: %v", ns, err)
+						continue
+					}
+					// Cache the NS record's A record
+					if len(nsResp.Answer) > 0 {
+						r.cache.Set(cache.Key(nsReq.Question[0]), nsResp, r.config.StaleWhileRevalidate, r.config.Prefetch)
+					}
 				}
 
 				for _, ans := range nsResp.Answer {
@@ -140,6 +177,11 @@ func (r *Resolver) lookup(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 
 		return r.servfail(req), nil
 	}
+}
+
+// LookupWithoutCache performs a recursive DNS lookup for a given request, bypassing the cache.
+func (r *Resolver) LookupWithoutCache(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
+	return r.lookup(ctx, req)
 }
 
 // query sends a DNS query to a list of nameservers.

@@ -29,9 +29,12 @@ func main() {
 	cfg := config.NewConfig()
 
 	// Create cache, worker pool, and resolver
-	c := cache.NewCache()
+	c := cache.NewCache(cache.DefaultCacheSize, cache.DefaultShards, cfg.PrefetchInterval)
 	wp := resolver.NewWorkerPool(cfg.MaxWorkers)
 	res := resolver.NewResolver(cfg, c, wp)
+
+	// Set the resolver in the cache for prefetching
+	c.SetResolver(res)
 
 	// Create and start the server
 	srv := server.NewServer(cfg)

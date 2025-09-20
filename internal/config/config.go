@@ -8,6 +8,8 @@ type Config struct {
 	UpstreamTimeout time.Duration
 	RequestTimeout  time.Duration
 	MaxWorkers      int
+	StaleWhileRevalidate time.Duration
+	PrefetchInterval time.Duration
 }
 
 // NewConfig returns a new Config with default values.
@@ -17,5 +19,7 @@ func NewConfig() *Config {
 		UpstreamTimeout: 5 * time.Second,
 		RequestTimeout:  5 * time.Second,
 		MaxWorkers:      100,
+		StaleWhileRevalidate: 1 * time.Minute,
+		PrefetchInterval: 30 * time.Second,
 	}
 }
