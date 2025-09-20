@@ -1,13 +1,16 @@
 package cache
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
 
 	"container/list"
 	"github.com/miekg/dns"
+	"github.com/astracat/dns-resolver/internal/resolver"
 )
 
 const (
@@ -226,10 +229,10 @@ func (c *Cache) Set(key string, msg *dns.Msg, swr, prefetch time.Duration) {
 		existingItem.Prefetch = prefetch
 		// Move to front of protected list
 		if existingItem.element != nil {
-			if existingItem.element.List == shard.probationList {
+			if existingItem.element.Container() == shard.probationList {
 				shard.probationList.Remove(existingItem.element)
 				shard.addProtected(key, existingItem)
-			} else if existingItem.element.List == shard.protectedList {
+			} else if existingItem.element.Container() == shard.protectedList {
 				shard.protectedList.MoveToFront(existingItem.element)
 			}
 		}
@@ -314,11 +317,11 @@ func (s *slruSegment) accessItem(item *CacheItem) {
 		return
 	}
 
-	if item.element.List == s.probationList {
+	if item.element.Container() == s.probationList {
 		// Item is in probation, move to protected.
 		s.probationList.Remove(item.element)
 		s.addProtected(item.element.Value.(string), item)
-	} else if item.element.List == s.protectedList {
+	} else if item.element.Container() == s.protectedList {
 		// Item is already in protected, move to front.
 		s.protectedList.MoveToFront(item.element)
 	}
