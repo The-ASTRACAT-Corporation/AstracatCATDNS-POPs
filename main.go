@@ -30,9 +30,9 @@ func main() {
 
 	// --- New Resolver Setup ---
 	// Enable the custom cache by assigning it to the resolver's global Cache variable.
-	customCache := cache.NewSimpleCache()
+	customCache := cache.NewLRUCache(10000)
 	resolver.Cache = customCache
-	log.Println("Simple in-memory cache enabled.")
+	log.Println("LRU in-memory cache enabled.")
 
 	// The nsmithuk/resolver is configured via global variables.
 	// We can set timeouts, etc. here if needed.
