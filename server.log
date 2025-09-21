@@ -1,18 +1,6 @@
-2025/09/21 18:30:02 Booting up ASTRACAT Resolver...
-2025/09/21 18:30:02 Simple in-memory cache enabled.
-2025/09/21 18:30:02 ASTRACAT DNS Resolver is running on 0.0.0.0:5053
-2025/09/21 18:30:02 Starting udp listener on 0.0.0.0:5053
-2025/09/21 18:30:02 Starting tcp listener on 0.0.0.0:5053
-2025/09/21 18:30:03 Query: 2a46fe3-1: 19.196368ms taken querying [cloudflare.com.] A in zone [.] on udp://a.root-servers.net. (198.41.0.4:53)
-2025/09/21 18:30:03 Query: 2a46fe3-1: 17.813339ms taken querying [cloudflare.com.] A in zone [.] on tcp://a.root-servers.net. (198.41.0.4:53)
-2025/09/21 18:30:03 Query: 2a46fe3-1: 30.069956ms taken querying [cloudflare.com.] A in zone [com.] on udp://l.gtld-servers.net. (192.41.162.30:53)
-2025/09/21 18:30:03 Query: 2a46fe3-1: 29.343948ms taken querying [cloudflare.com.] A in zone [com.] on tcp://l.gtld-servers.net. (192.41.162.30:53)
-2025/09/21 18:30:03 Query: 2a46fe3-1: 14.376102ms taken querying [cloudflare.com.] A in zone [cloudflare.com.] on udp://ns3.cloudflare.com. (162.159.0.33:53)
-2025/09/21 18:30:03 Resolved cloudflare.com., DNSSEC status: Unknown
-2025/09/21 18:30:03 Query: 9ba5e03-1: 12.672844ms taken querying [.] DNSKEY in zone [.] on udp://d.root-servers.net. (199.7.91.13:53)
-2025/09/21 18:30:03 Query: 9ba5e03-1: 21.040977ms taken querying [ripe.net.] A in zone [.] on udp://c.root-servers.net. (192.33.4.12:53)
-2025/09/21 18:30:03 Query: 9ba5e03-1: 12.418763ms taken querying [net.] DNSKEY in zone [net.] on udp://i.gtld-servers.net. (192.43.172.30:53)
-2025/09/21 18:30:03 Query: 9ba5e03-1: 29.432862ms taken querying [ripe.net.] A in zone [net.] on udp://k.gtld-servers.net. (192.52.178.30:53)
-2025/09/21 18:30:03 Query: 9ba5e03-1: 12.773684ms taken querying [ripe.net.] DNSKEY in zone [ripe.net.] on udp://ns3.afrinic.net. (204.61.216.100:53)
-2025/09/21 18:30:03 Query: 9ba5e03-1: 13.860957ms taken querying [ripe.net.] A in zone [ripe.net.] on udp://ns4.apnic.net. (202.12.31.53:53)
-2025/09/21 18:30:03 Resolved ripe.net., DNSSEC status: Secure
+2025/09/21 19:55:32 Booting up ASTRACAT Resolver...
+2025/09/21 19:55:32 Multi-level cache and new resolver enabled.
+2025/09/21 19:55:32 ASTRACAT DNS Resolver is running on 0.0.0.0:5053
+2025/09/21 19:55:32 Starting tcp listener on 0.0.0.0:5053
+2025/09/21 19:55:32 Starting udp listener on 0.0.0.0:5053
+2025/09/21 19:55:33 Received query for cloudflare.com.
