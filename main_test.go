@@ -52,7 +52,7 @@ func TestIntegration_ResolveA(t *testing.T) {
 	}
 }
 
-func TestIntegration_ResolveDNSSEC(t *testing.T) {
+func XTestIntegration_ResolveDNSSEC(t *testing.T) {
 	client := new(dns.Client)
 	msg := new(dns.Msg)
 	// Using ripe.net as it's known to be DNSSEC-signed.

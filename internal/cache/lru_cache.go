@@ -34,8 +34,8 @@ func NewLRUCache(maxSize int) *LRUCache {
 	}
 }
 
-// key generates a unique cache key for a zone and question.
-func (c *LRUCache) key(zone string, q dns.Question) string {
+// GenerateCacheKey creates a unique cache key for a zone and question.
+func GenerateCacheKey(zone string, q dns.Question) string {
 	return fmt.Sprintf("%s:%s:%d:%d", zone, q.Name, q.Qtype, q.Qclass)
 }
 
@@ -44,7 +44,7 @@ func (c *LRUCache) Get(zone string, question dns.Question) (*dns.Msg, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	key := c.key(zone, question)
+	key := GenerateCacheKey(zone, question)
 	if elem, hit := c.cache[key]; hit {
 		c.ll.MoveToFront(elem)
 		return elem.Value.(*entry).value.Copy(), nil
@@ -57,7 +57,7 @@ func (c *LRUCache) Update(zone string, question dns.Question, msg *dns.Msg) erro
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	key := c.key(zone, question)
+	key := GenerateCacheKey(zone, question)
 	if elem, hit := c.cache[key]; hit {
 		c.ll.MoveToFront(elem)
 		elem.Value.(*entry).value = msg.Copy()
