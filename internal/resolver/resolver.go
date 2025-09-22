@@ -122,12 +122,25 @@ func (r *Resolver) lookup(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 			return nil, fmt.Errorf("querying nameservers failed: %w", err)
 		}
 
-		if len(resp.Answer) > 0 {
+		// If we get a valid answer, cache and return it.
+		if resp.Rcode == dns.RcodeSuccess && len(resp.Answer) > 0 {
 			r.cache.Set(cache.Key(q), resp, r.config.StaleWhileRevalidate, r.config.PrefetchInterval)
 			return resp, nil
 		}
 
-		if resp.Rcode == dns.RcodeNameError {
+		// Check for SOA record in authority section to identify authoritative negative/NODATA responses.
+		isAuthoritativeNegative := false
+		if resp.Rcode == dns.RcodeNameError || resp.Rcode == dns.RcodeSuccess {
+			for _, ns := range resp.Ns {
+				if _, ok := ns.(*dns.SOA); ok {
+					isAuthoritativeNegative = true
+					break
+				}
+			}
+		}
+
+		// Handle negative responses (NXDOMAIN, NODATA) from authoritative servers.
+		if isAuthoritativeNegative {
 			r.cache.Set(cache.Key(q), resp, r.config.StaleWhileRevalidate, r.config.PrefetchInterval)
 			return resp, nil
 		}
