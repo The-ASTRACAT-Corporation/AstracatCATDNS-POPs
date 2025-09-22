@@ -14,13 +14,13 @@ func TestResolver_Resolve(t *testing.T) {
 	// Create a new cache and resolver for the test.
 	cfg := config.NewConfig()
 	c := cache.NewCache(cache.DefaultCacheSize, cache.DefaultShards, cfg.PrefetchInterval)
-	wp := NewWorkerPool(cfg.MaxWorkers)
-	r := NewResolver(cfg, c, wp)
+	r := NewResolver(cfg, c)
 
 	// Define the question to test.
 	req := new(dns.Msg)
 	req.SetQuestion("www.google.com.", dns.TypeA)
 	req.RecursionDesired = true
+	req.SetEdns0(4096, true) // Enable DNSSEC OK bit
 
 	// Resolve the domain.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

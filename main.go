@@ -28,10 +28,9 @@ func main() {
 	// Load configuration
 	cfg := config.NewConfig()
 
-	// Create cache, worker pool, and resolver
+	// Create cache and resolver
 	c := cache.NewCache(cache.DefaultCacheSize, cache.DefaultShards, cfg.PrefetchInterval)
-	wp := resolver.NewWorkerPool(cfg.MaxWorkers)
-	res := resolver.NewResolver(cfg, c, wp)
+	res := resolver.NewResolver(cfg, c)
 
 	// Set the resolver in the cache for prefetching
 	c.SetResolver(res)
@@ -46,6 +45,7 @@ func main() {
 		req := new(dns.Msg)
 		req.SetQuestion(r.Question[0].Name, r.Question[0].Qtype)
 		req.RecursionDesired = true
+		req.SetEdns0(4096, true) // Enable DNSSEC OK bit
 
 		ctx, cancel := context.WithTimeout(context.Background(), cfg.RequestTimeout)
 		defer cancel()
