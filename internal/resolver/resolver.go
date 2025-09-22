@@ -8,7 +8,7 @@ import (
 	"dns-resolver/internal/config"
 
 	"github.com/miekg/dns"
-	"github.com/nsmithuk/resolver"
+	extresolver "github.com/nsmithuk/resolver"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -17,7 +17,7 @@ type Resolver struct {
 	config *config.Config
 	cache  *cache.Cache
 	sf     singleflight.Group
-	dnssec *resolver.Resolver
+	dnssec *extresolver.Resolver
 }
 
 // NewResolver creates a new resolver instance.
@@ -26,7 +26,7 @@ func NewResolver(cfg *config.Config, c *cache.Cache) *Resolver {
 		config: cfg,
 		cache:  c,
 		sf:     singleflight.Group{},
-		dnssec: resolver.NewResolver(),
+		dnssec: extresolver.NewResolver(),
 	}
 	c.SetResolver(r)
 	return r
