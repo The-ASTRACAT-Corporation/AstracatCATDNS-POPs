@@ -41,15 +41,24 @@ func main() {
 
 	// Create a handler function that uses the resolver
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		// Create a new request message to avoid modifying the original request.
+		// This is safer and avoids potential race conditions or corruption of the original message.
+		req := new(dns.Msg)
+		req.SetQuestion(r.Question[0].Name, r.Question[0].Qtype)
+		req.RecursionDesired = true
+
 		ctx, cancel := context.WithTimeout(context.Background(), cfg.RequestTimeout)
 		defer cancel()
 
-		msg, err := res.Resolve(ctx, r)
+		msg, err := res.Resolve(ctx, req)
 		if err != nil {
-			log.Printf("Failed to resolve %s: %v", r.Question[0].Name, err)
+			log.Printf("Failed to resolve %s: %v", req.Question[0].Name, err)
 			dns.HandleFailed(w, r)
 			return
 		}
+
+		// Set the response ID to match the original request ID.
+		msg.Id = r.Id
 
 		if err := w.WriteMsg(msg); err != nil {
 			log.Printf("Failed to write response: %v", err)

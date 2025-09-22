@@ -8,7 +8,7 @@ import (
 )
 
 func TestCache_SetGet(t *testing.T) {
-	c := NewCache()
+	c := NewCache(DefaultCacheSize, DefaultShards, 1*time.Minute)
 	q := dns.Question{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	key := Key(q)
 
@@ -20,9 +20,9 @@ func TestCache_SetGet(t *testing.T) {
 	}
 	msg.Answer = append(msg.Answer, rr)
 
-	c.Set(key, msg)
+	c.Set(key, msg, 0, 0)
 
-	retrievedMsg, found := c.Get(key)
+	retrievedMsg, found, _ := c.Get(key)
 	if !found {
 		t.Fatal("expected to find message in cache")
 	}
@@ -37,7 +37,7 @@ func TestCache_SetGet(t *testing.T) {
 }
 
 func TestCache_Expiration(t *testing.T) {
-	c := NewCache()
+	c := NewCache(DefaultCacheSize, DefaultShards, 1*time.Minute)
 	q := dns.Question{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	key := Key(q)
 
@@ -50,19 +50,19 @@ func TestCache_Expiration(t *testing.T) {
 	}
 	msg.Answer = append(msg.Answer, rr)
 
-	c.Set(key, msg)
+	c.Set(key, msg, 0, 0)
 
 	// Wait for the item to expire
 	time.Sleep(2 * time.Second)
 
-	_, found := c.Get(key)
+	_, found, _ := c.Get(key)
 	if found {
 		t.Fatal("expected message to be expired from cache")
 	}
 }
 
 func TestCache_GetCopy(t *testing.T) {
-	c := NewCache()
+	c := NewCache(DefaultCacheSize, DefaultShards, 1*time.Minute)
 	q := dns.Question{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	key := Key(q)
 
@@ -74,9 +74,9 @@ func TestCache_GetCopy(t *testing.T) {
 	}
 	msg.Answer = append(msg.Answer, rr)
 
-	c.Set(key, msg)
+	c.Set(key, msg, 0, 0)
 
-	retrievedMsg, found := c.Get(key)
+	retrievedMsg, found, _ := c.Get(key)
 	if !found {
 		t.Fatal("expected to find message in cache")
 	}
@@ -85,14 +85,14 @@ func TestCache_GetCopy(t *testing.T) {
 	retrievedMsg.Answer[0].(*dns.A).A[0] = 255
 
 	// Get the message again and check if it was modified in the cache
-	retrievedMsg2, _ := c.Get(key)
+	retrievedMsg2, _, _ := c.Get(key)
 	if retrievedMsg2.Answer[0].(*dns.A).A[0] == 255 {
 		t.Fatal("Get should return a copy of the message, but the original was modified")
 	}
 }
 
 func TestCache_NXDOMAIN_Caching(t *testing.T) {
-	c := NewCache()
+	c := NewCache(DefaultCacheSize, DefaultShards, 1*time.Minute)
 	q := dns.Question{Name: "nonexistent.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	key := Key(q)
 
@@ -107,9 +107,9 @@ func TestCache_NXDOMAIN_Caching(t *testing.T) {
 	}
 	msg.Ns = append(msg.Ns, soaRR)
 
-	c.Set(key, msg)
+	c.Set(key, msg, 0, 0)
 
-	retrievedMsg, found := c.Get(key)
+	retrievedMsg, found, _ := c.Get(key)
 	if !found {
 		t.Fatal("expected to find NXDOMAIN message in cache")
 	}
@@ -125,7 +125,7 @@ func TestCache_NXDOMAIN_Caching(t *testing.T) {
 
 	// Test expiration for NXDOMAIN
 	time.Sleep(2 * time.Second) // SOA Minttl is 60, so it should still be in cache
-	_, foundAfterDelay := c.Get(key)
+	_, foundAfterDelay, _ := c.Get(key)
 	if !foundAfterDelay {
 		t.Fatal("expected NXDOMAIN message to still be in cache after short delay")
 	}
