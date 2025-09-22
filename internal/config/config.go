@@ -4,22 +4,24 @@ import "time"
 
 // Config holds the configuration for the DNS resolver.
 type Config struct {
-	ListenAddr      string
-	UpstreamTimeout time.Duration
-	RequestTimeout  time.Duration
-	MaxWorkers      int
+	ListenAddr           string
+	UpstreamTimeout      time.Duration
+	RequestTimeout       time.Duration
+	MaxWorkers           int
+	CacheSize            int
 	StaleWhileRevalidate time.Duration
-	PrefetchInterval time.Duration
+	PrefetchInterval     time.Duration
 }
 
 // NewConfig returns a new Config with default values.
 func NewConfig() *Config {
 	return &Config{
-		ListenAddr:      "0.0.0.0:5053",
-		UpstreamTimeout: 5 * time.Second,
-		RequestTimeout:  5 * time.Second,
-		MaxWorkers:      100,
+		ListenAddr:           "0.0.0.0:5053",
+		UpstreamTimeout:      5 * time.Second,
+		RequestTimeout:       5 * time.Second,
+		MaxWorkers:           100,
+		CacheSize:            50000,
 		StaleWhileRevalidate: 1 * time.Minute,
-		PrefetchInterval: 30 * time.Second,
+		PrefetchInterval:     30 * time.Second,
 	}
 }
