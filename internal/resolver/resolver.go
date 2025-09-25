@@ -14,19 +14,21 @@ import (
 
 // Resolver is a recursive DNS resolver.
 type Resolver struct {
-	config *config.Config
-	cache  *cache.Cache
-	sf     singleflight.Group
-	dnssec *extresolver.Resolver
+	config     *config.Config
+	cache      *cache.Cache
+	sf         singleflight.Group
+	dnssec     *extresolver.Resolver
+	workerPool *WorkerPool
 }
 
 // NewResolver creates a new resolver instance.
 func NewResolver(cfg *config.Config, c *cache.Cache) *Resolver {
 	r := &Resolver{
-		config: cfg,
-		cache:  c,
-		sf:     singleflight.Group{},
-		dnssec: extresolver.NewResolver(),
+		config:     cfg,
+		cache:      c,
+		sf:         singleflight.Group{},
+		dnssec:     extresolver.NewResolver(),
+		workerPool: NewWorkerPool(cfg.MaxWorkers),
 	}
 	c.SetResolver(r)
 	return r
@@ -53,10 +55,17 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, error) 
 		cachedMsg.Id = req.Id
 
 		if revalidate {
-			// Trigger a background revalidation
+			// Trigger a background revalidation using the worker pool
 			go func() {
+				if err := r.workerPool.Acquire(context.Background()); err != nil {
+					log.Printf("Failed to acquire worker for revalidation: %v", err)
+					return
+				}
+				defer r.workerPool.Release()
+
 				ctx, cancel := context.WithTimeout(context.Background(), r.config.UpstreamTimeout)
 				defer cancel()
+
 				_, err, _ := r.sf.Do(key+"-revalidate", func() (interface{}, error) {
 					return r.exchange(ctx, req)
 				})

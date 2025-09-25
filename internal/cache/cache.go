@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"container/list"
-	"github.com/miekg/dns"
 	"dns-resolver/internal/interfaces"
+	"github.com/miekg/dns"
 )
 
 const (
@@ -40,16 +40,16 @@ type CacheItem struct {
 // slruSegment represents one segment of the SLRU cache.
 type slruSegment struct {
 	sync.RWMutex
-	items map[string]*CacheItem
-	probationList *list.List // Probation segment (MRU of this list moves to protected)
-	protectedList *list.List // Protected segment (MRU of this list stays, LRU moves to probation or evicted)
+	items             map[string]*CacheItem
+	probationList     *list.List // Probation segment (MRU of this list moves to protected)
+	protectedList     *list.List // Protected segment (MRU of this list stays, LRU moves to probation or evicted)
 	probationCapacity int
 	protectedCapacity int
 }
 
 // Cache is a thread-safe, sharded DNS cache with SLRU eviction policy.
 type Cache struct {
-	shards []*slruSegment
+	shards    []*slruSegment
 	numShards uint32
 	// These are total capacities, distributed among shards
 	probationSize int
@@ -57,8 +57,8 @@ type Cache struct {
 
 	// Prefetch related fields
 	prefetchInterval time.Duration
-	stopPrefetch chan struct{}
-	resolver interfaces.CacheResolver // Reference to the resolver for prefetching
+	stopPrefetch     chan struct{}
+	resolver         interfaces.CacheResolver // Reference to the resolver for prefetching
 }
 
 // NewCache creates and returns a new Cache.
@@ -76,21 +76,21 @@ func NewCache(size int, numShards int, prefetchInterval time.Duration) *Cache {
 	shards := make([]*slruSegment, numShards)
 	for i := 0; i < numShards; i++ {
 		shards[i] = &slruSegment{
-			items: make(map[string]*CacheItem),
-			probationList: list.New(),
-			protectedList: list.New(),
+			items:             make(map[string]*CacheItem),
+			probationList:     list.New(),
+			protectedList:     list.New(),
 			probationCapacity: probationSize / numShards,
 			protectedCapacity: protectedSize / numShards,
 		}
 	}
 
 	return &Cache{
-		shards: shards,
-		numShards: uint32(numShards),
-		probationSize: probationSize,
-		protectedSize: protectedSize,
+		shards:           shards,
+		numShards:        uint32(numShards),
+		probationSize:    probationSize,
+		protectedSize:    protectedSize,
 		prefetchInterval: prefetchInterval,
-		stopPrefetch: make(chan struct{}),
+		stopPrefetch:     make(chan struct{}),
 	}
 }
 
@@ -243,10 +243,10 @@ func (c *Cache) Set(key string, msg *dns.Msg, swr, prefetch time.Duration) {
 
 	// New item, add to probation segment.
 	item := &CacheItem{
-		Message:    msg.Copy(),
-		Expiration: expiration,
+		Message:              msg.Copy(),
+		Expiration:           expiration,
 		StaleWhileRevalidate: swr,
-		Prefetch: prefetch,
+		Prefetch:             prefetch,
 	}
 	shard.addProbation(key, item)
 }

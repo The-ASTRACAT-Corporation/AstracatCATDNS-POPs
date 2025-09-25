@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"sync"
 
 	"dns-resolver/internal/cache"
 	"dns-resolver/internal/config"
@@ -11,6 +12,12 @@ import (
 	"dns-resolver/internal/server"
 	"github.com/miekg/dns"
 )
+
+var msgPool = sync.Pool{
+	New: func() interface{} {
+		return new(dns.Msg)
+	},
+}
 
 func main() {
 	// Open a file for logging. Truncate the file if it already exists.
@@ -40,9 +47,15 @@ func main() {
 
 	// Create a handler function that uses the resolver
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
-		// Create a new request message to avoid modifying the original request.
-		// This is safer and avoids potential race conditions or corruption of the original message.
-		req := new(dns.Msg)
+		// Get a new dns.Msg from the pool
+		req := msgPool.Get().(*dns.Msg)
+		defer func() {
+			// Reset the message and return it to the pool
+			*req = dns.Msg{}
+			msgPool.Put(req)
+		}()
+
+		// Set up the request message
 		req.SetQuestion(r.Question[0].Name, r.Question[0].Qtype)
 		req.RecursionDesired = true
 		req.SetEdns0(4096, true) // Enable DNSSEC OK bit
