@@ -38,8 +38,6 @@ func (s *Server) startListener(net string) {
 	}
 }
 
-
-
 // SetHandler allows replacing the default handler.
 // This will be used to inject the resolver logic later.
 func (s *Server) SetHandler(handler dns.Handler) {
