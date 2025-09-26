@@ -10,6 +10,8 @@ import (
 	"github.com/miekg/dns"
 )
 
+const slruProbationFraction = 0.8
+
 // RRsetCacheItem represents an item in the RRset cache.
 type RRsetCacheItem struct {
 	RRset      []dns.RR

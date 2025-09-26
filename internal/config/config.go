@@ -9,6 +9,10 @@ type Config struct {
 	RequestTimeout       time.Duration
 	MaxWorkers           int
 	CacheSize            int
+	MessageCacheSize     int
+  RRsetCacheSize       int
+  CacheMaxTTL          time.Duration
+	CacheMinTTL          time.Duration
 	StaleWhileRevalidate time.Duration
 	PrefetchInterval     time.Duration
 }
@@ -21,6 +25,10 @@ func NewConfig() *Config {
 		RequestTimeout:       5 * time.Second,
 		MaxWorkers:           100,
 		CacheSize:            50000,
+		MessageCacheSize:     50000,
+  RRsetCacheSize:       50000,
+  CacheMaxTTL:          3600 * time.Second,
+		CacheMinTTL:          60 * time.Second,
 		StaleWhileRevalidate: 1 * time.Minute,
 		PrefetchInterval:     30 * time.Second,
 	}

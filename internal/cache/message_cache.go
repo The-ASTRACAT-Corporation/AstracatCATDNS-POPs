@@ -3,25 +3,13 @@ package cache
 import (
 	"context"
 	"dns-resolver/internal/config"
-	"fmt"
 	"log"
-	"strings"
 	"sync"
 	"time"
 
 	"container/list"
 	"dns-resolver/internal/interfaces"
 	"github.com/miekg/dns"
-)
-
-const (
-	// DefaultCacheSize is the default number of items the cache can hold.
-	DefaultCacheSize = 10000
-	// DefaultShards is the default number of shards for the cache.
-	DefaultShards = 32
-
-	// slruProbationFraction is the fraction of the cache size allocated to the probation segment.
-	slruProbationFraction = 0.8
 )
 
 // MessageCacheItem represents an item in the message cache.
@@ -66,7 +54,7 @@ type MessageCache struct {
 
 // NewMessageCache creates and returns a new MessageCache.
 func NewMessageCache(cfg *config.Config, numShards int) *MessageCache {
-	size := cfg.MessageCacheSize
+	size := cfg.CacheSize
 	if size <= 0 {
 		size = DefaultCacheSize
 	}
@@ -74,7 +62,7 @@ func NewMessageCache(cfg *config.Config, numShards int) *MessageCache {
 		numShards = DefaultShards
 	}
 
-	probationSize := int(float64(size) * slruProbationFraction)
+	probationSize := int(float64(size) * SlruProbationFraction)
 	protectedSize := size - probationSize
 
 	shards := make([]*messageSlruSegment, numShards)
@@ -168,25 +156,10 @@ func (c *MessageCache) performPrefetch(key string, q dns.Question) {
 	}
 }
 
-// Key generates a cache key from a dns.Question.
-func Key(q dns.Question) string {
-	return fmt.Sprintf("%s:%d:%d", strings.ToLower(q.Name), q.Qtype, q.Qclass)
-}
-
 // getShard returns the shard for a given key.
 func (c *MessageCache) getShard(key string) *messageSlruSegment {
 	hash := fnv32(key)
 	return c.shards[hash%c.numShards]
-}
-
-// fnv32 generates a 32-bit FNV hash for a string.
-func fnv32(key string) uint32 {
-	hash := uint32(2166136261)
-	for i := 0; i < len(key); i++ {
-		hash *= 16777619
-		hash ^= uint32(key[i])
-	}
-	return hash
 }
 
 // Get retrieves a message from the cache.

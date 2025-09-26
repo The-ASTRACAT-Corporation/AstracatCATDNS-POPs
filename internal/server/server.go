@@ -34,7 +34,7 @@ func (s *Server) startListener(net string) {
 	server := &dns.Server{Addr: s.config.ListenAddr, Net: net, Handler: s.handler}
 	log.Printf("Starting %s listener on %s", net, s.config.ListenAddr)
 	if err := server.ListenAndServe(); err != nil {
-		log.Fatalf("Failed to start %s listener: %s", net, err)
+		log.Printf("Failed to start %s listener: %s", net, err)
 	}
 }
 

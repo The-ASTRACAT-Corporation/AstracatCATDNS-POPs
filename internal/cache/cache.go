@@ -12,17 +12,6 @@ import (
 	"dns-resolver/internal/interfaces"
 	"github.com/miekg/dns"
 )
-
-const (
-	// DefaultCacheSize is the default number of items the cache can hold.
-	DefaultCacheSize = 10000
-	// DefaultShards is the default number of shards for the cache.
-	DefaultShards = 32
-
-	// slruProbationFraction is the fraction of the cache size allocated to the probation segment.
-	slruProbationFraction = 0.8
-)
-
 // CacheItem represents an item in the cache.
 type CacheItem struct {
 	Message    *dns.Msg
@@ -70,7 +59,7 @@ func NewCache(size int, numShards int, prefetchInterval time.Duration) *Cache {
 		numShards = DefaultShards
 	}
 
-	probationSize := int(float64(size) * slruProbationFraction)
+	probationSize := int(float64(size) * SlruProbationFraction)
 	protectedSize := size - probationSize
 
 	shards := make([]*slruSegment, numShards)
