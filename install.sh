@@ -19,8 +19,8 @@ fi
 echo "📁 Project directory: $PROJECT_DIR"
 cd "$PROJECT_DIR"
 
-echo "🔨 Building the project with optimizations..."
-go build -ldflags="-s -w" -o "$SERVICE_NAME" .
+echo "🔨 Building the project..."
+go build -o "$SERVICE_NAME" .
 
 if [ ! -f "$BINARY_PATH" ]; then
     echo "❌ Build failed: binary not found at $BINARY_PATH"

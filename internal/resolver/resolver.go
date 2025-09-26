@@ -8,25 +8,27 @@ import (
 	"dns-resolver/internal/config"
 
 	"github.com/miekg/dns"
-	"github.com/nsmithuk/resolver"
+	extresolver "github.com/nsmithuk/resolver"
 	"golang.org/x/sync/singleflight"
 )
 
 // Resolver is a recursive DNS resolver.
 type Resolver struct {
-	config            *config.Config
-	cache             *cache.MultiLevelCache
-	sf                singleflight.Group
-	recursiveResolver *resolver.Resolver
+	config     *config.Config
+	cache      *cache.Cache
+	sf         singleflight.Group
+	dnssec     *extresolver.Resolver
+	workerPool *WorkerPool
 }
 
 // NewResolver creates a new resolver instance.
-func NewResolver(cfg *config.Config, c *cache.MultiLevelCache) *Resolver {
+func NewResolver(cfg *config.Config, c *cache.Cache) *Resolver {
 	r := &Resolver{
-		config:            cfg,
-		cache:             c,
-		sf:                singleflight.Group{},
-		recursiveResolver: resolver.NewResolver(),
+		config:     cfg,
+		cache:      c,
+		sf:         singleflight.Group{},
+		dnssec:     extresolver.NewResolver(),
+		workerPool: NewWorkerPool(cfg.MaxWorkers),
 	}
 	c.SetResolver(r)
 	return r
@@ -45,17 +47,22 @@ func (r *Resolver) GetConfig() *config.Config {
 // Resolve performs a recursive DNS lookup for a given request.
 func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 	q := req.Question[0]
-	key := cache.Key(q) // Define key early
+	key := cache.Key(q)
 
 	// Check the cache first.
-	if cachedMsg, found, revalidate := r.cache.Get(q); found {
+	if cachedMsg, found, revalidate := r.cache.Get(key); found {
 		log.Printf("Cache hit for %s (revalidate: %t)", q.Name, revalidate)
 		cachedMsg.Id = req.Id
 
 		if revalidate {
 			// Trigger a background revalidation using the worker pool
 			go func() {
-				// For revalidation, we don't need a worker pool as the resolver library is concurrent.
+				if err := r.workerPool.Acquire(context.Background()); err != nil {
+					log.Printf("Failed to acquire worker for revalidation: %v", err)
+					return
+				}
+				defer r.workerPool.Release()
+
 				ctx, cancel := context.WithTimeout(context.Background(), r.config.UpstreamTimeout)
 				defer cancel()
 
@@ -88,13 +95,11 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, error) 
 	return msg, nil
 }
 
-// exchange performs a recursive DNS lookup using the integrated library.
+// exchange is a wrapper around the DNSSEC resolver's Exchange method.
 func (r *Resolver) exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
-	result := r.recursiveResolver.Exchange(ctx, req)
+	result := r.dnssec.Exchange(ctx, req)
 	if result.Err != nil {
-		// Even if there's an error, the response might contain useful information (e.g., SERVFAIL).
-		// We return both, and the caller can decide how to handle it.
-		return result.Msg, result.Err
+		return nil, result.Err
 	}
 	return result.Msg, nil
 }
