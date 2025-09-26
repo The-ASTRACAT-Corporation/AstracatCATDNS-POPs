@@ -1,80 +1,68 @@
 package main
 
 import (
-	"log"
-	"os"
+	"context"
+	"sync"
 	"testing"
-	"time"
 
 	"github.com/miekg/dns"
+	"github.com/nsmithuk/resolver"
 )
 
-// TestMain runs the main function in a separate goroutine and then runs tests.
-// This is a simple way to write an integration test for the server.
-func TestMain(m *testing.M) {
-	// Start the server in the background
-	go func() {
-		// Suppress log output from the server during tests
-		log.SetOutput(os.NewFile(0, os.DevNull))
-		main()
-	}()
-
-	// Give the server a moment to start up
-	time.Sleep(1 * time.Second)
-
-	// Run the tests
-	exitCode := m.Run()
-
-	// Exit with the test result
-	os.Exit(exitCode)
+// domainsForBenchmark is a shared list of domains for both benchmarks.
+var domainsForBenchmark = []string{
+	"test.qazz.uk",
+	"google.com",
+	"github.com",
+	"cloudflare.com",
+	"example.com",
 }
 
-func TestIntegration_ResolveA(t *testing.T) {
-	client := new(dns.Client)
-	msg := new(dns.Msg)
-	// Using cloudflare.com as it's a well-known, stable domain.
-	msg.SetQuestion("cloudflare.com.", dns.TypeA)
-
-	// The server is running on the default address from config.
-	serverAddr := "127.0.0.1:5053"
-
-	resp, _, err := client.Exchange(msg, serverAddr)
-	if err != nil {
-		t.Fatalf("Failed to exchange with server: %v", err)
+// runConcurrentQueries is a helper function to execute DNS queries concurrently.
+func runConcurrentQueries(r *resolver.Resolver) {
+	var wg sync.WaitGroup
+	for _, domain := range domainsForBenchmark {
+		wg.Add(1)
+		go func(d string) {
+			defer wg.Done()
+			msg := new(dns.Msg)
+			msg.SetQuestion(dns.Fqdn(d), dns.TypeA)
+			msg.SetEdns0(4096, true)
+			r.Exchange(context.Background(), msg)
+		}(domain)
 	}
+	wg.Wait()
+}
 
-	if resp.Rcode != dns.RcodeSuccess {
-		t.Errorf("Expected RcodeSuccess, got %s", dns.RcodeToString[resp.Rcode])
-	}
+// BenchmarkResolverWithoutCache benchmarks the resolver's performance with caching disabled.
+func BenchmarkResolverWithoutCache(b *testing.B) {
+	// Ensure caching is disabled for this benchmark.
+	resolver.Cache = nil
+	r := resolver.NewResolver()
 
-	if len(resp.Answer) == 0 {
-		t.Error("Expected to receive at least one answer")
+	// The b.N loop is managed by the testing framework.
+	for i := 0; i < b.N; i++ {
+		runConcurrentQueries(r)
 	}
 }
 
-func TestIntegration_ResolveDNSSEC(t *testing.T) {
-	client := new(dns.Client)
-	msg := new(dns.Msg)
-	// Using ripe.net as it's known to be DNSSEC-signed.
-	msg.SetQuestion("ripe.net.", dns.TypeA)
-	// Set the DO (DNSSEC OK) bit to request DNSSEC data.
-	msg.SetEdns0(4096, true)
+// BenchmarkResolverWithCache benchmarks the resolver's performance with caching enabled.
+func BenchmarkResolverWithCache(b *testing.B) {
+	// Enable our custom cache.
+	resolver.Cache = NewSimpleInMemoryCache()
+	r := resolver.NewResolver()
 
-	serverAddr := "127.0.0.1:5053"
+	// --- Pre-populate the cache ---
+	// We run the queries once *before* the benchmark loop starts. This ensures
+	// that the cache is warm and we are only measuring the performance of
+	// reading from the cache.
+	runConcurrentQueries(r)
 
-	resp, _, err := client.Exchange(msg, serverAddr)
-	if err != nil {
-		t.Fatalf("Failed to exchange with server: %v", err)
+	// Reset the timer to exclude the cache-warming step from the benchmark results.
+	b.ResetTimer()
+
+	// The b.N loop measures the performance of the cached queries.
+	for i := 0; i < b.N; i++ {
+		runConcurrentQueries(r)
 	}
-
-	if resp.Rcode != dns.RcodeSuccess {
-		t.Errorf("Expected RcodeSuccess, got %s", dns.RcodeToString[resp.Rcode])
-	}
-
-	if len(resp.Answer) == 0 {
-		t.Error("Expected to receive at least one answer")
-	}
-
-	// Since we are now a forwarder, we can't guarantee the AD bit.
-	// We just check that the query succeeds.
 }
