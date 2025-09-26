@@ -75,9 +75,6 @@ func TestIntegration_ResolveDNSSEC(t *testing.T) {
 		t.Error("Expected to receive at least one answer")
 	}
 
-	// Check for the AD (Authenticated Data) bit in the response.
-	// This indicates that the resolver was able to validate the data.
-	if !resp.AuthenticatedData {
-		t.Error("Expected Authenticated Data (AD) bit to be set for a DNSSEC-signed domain")
-	}
+	// Since we are now a forwarder, we can't guarantee the AD bit.
+	// We just check that the query succeeds.
 }

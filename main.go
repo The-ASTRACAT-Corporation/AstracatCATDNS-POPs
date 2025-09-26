@@ -2,9 +2,8 @@ package main
 
 import (
 	"context"
+	"io"
 	"log"
-	"os"
-	"sync"
 
 	"dns-resolver/internal/cache"
 	"dns-resolver/internal/config"
@@ -13,24 +12,10 @@ import (
 	"github.com/miekg/dns"
 )
 
-var msgPool = sync.Pool{
-	New: func() interface{} {
-		return new(dns.Msg)
-	},
-}
-
 func main() {
-	// Open a file for logging. Truncate the file if it already exists.
-	logFile, err := os.OpenFile("server.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
-	if err != nil {
-		log.Fatalf("Failed to open log file: %v", err)
-	}
-	defer logFile.Close()
-
-	// Set the output of the log package to the file.
-	log.SetOutput(logFile)
-
-	log.Println("Booting up ASTRACAT Relover...")
+	// Discard logs to avoid file I/O, as systemd handles logging.
+	log.SetOutput(io.Discard)
+	log.Println("Booting up ASTRACAT Resolver...")
 
 	// Load configuration
 	cfg := config.NewConfig()
@@ -47,16 +32,7 @@ func main() {
 
 	// Create a handler function that uses the resolver
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
-		// Get a new dns.Msg from the pool
-		req := msgPool.Get().(*dns.Msg)
-		defer func() {
-			// Reset the message and return it to the pool
-			*req = dns.Msg{}
-			msgPool.Put(req)
-		}()
-
-		// Set up the request message
-		req.SetQuestion(r.Question[0].Name, r.Question[0].Qtype)
+		req := r.Copy()
 		req.RecursionDesired = true
 		req.SetEdns0(4096, true) // Enable DNSSEC OK bit
 
@@ -70,7 +46,6 @@ func main() {
 			return
 		}
 
-		// Set the response ID to match the original request ID.
 		msg.Id = r.Id
 
 		if err := w.WriteMsg(msg); err != nil {
