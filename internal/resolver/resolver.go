@@ -8,26 +8,25 @@ import (
 	"dns-resolver/internal/config"
 
 	"github.com/miekg/dns"
+	"github.com/nsmithuk/resolver"
 	"golang.org/x/sync/singleflight"
 )
 
 // Resolver is a recursive DNS resolver.
 type Resolver struct {
-	config     *config.Config
-	cache      *cache.MultiLevelCache
-	sf         singleflight.Group
-	dnsClient  *dns.Client
-	workerPool *WorkerPool
+	config            *config.Config
+	cache             *cache.MultiLevelCache
+	sf                singleflight.Group
+	recursiveResolver *resolver.Resolver
 }
 
 // NewResolver creates a new resolver instance.
 func NewResolver(cfg *config.Config, c *cache.MultiLevelCache) *Resolver {
 	r := &Resolver{
-		config:     cfg,
-		cache:      c,
-		sf:         singleflight.Group{},
-		dnsClient:  &dns.Client{Net: "udp", Timeout: cfg.UpstreamTimeout},
-		workerPool: NewWorkerPool(cfg.MaxWorkers),
+		config:            cfg,
+		cache:             c,
+		sf:                singleflight.Group{},
+		recursiveResolver: resolver.NewResolver(),
 	}
 	c.SetResolver(r)
 	return r
@@ -56,12 +55,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, error) 
 		if revalidate {
 			// Trigger a background revalidation using the worker pool
 			go func() {
-				if err := r.workerPool.Acquire(context.Background()); err != nil {
-					log.Printf("Failed to acquire worker for revalidation: %v", err)
-					return
-				}
-				defer r.workerPool.Release()
-
+				// For revalidation, we don't need a worker pool as the resolver library is concurrent.
 				ctx, cancel := context.WithTimeout(context.Background(), r.config.UpstreamTimeout)
 				defer cancel()
 
@@ -94,13 +88,15 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, error) 
 	return msg, nil
 }
 
-// exchange performs a DNS lookup using a standard DNS client, forwarding to a public resolver.
+// exchange performs a recursive DNS lookup using the integrated library.
 func (r *Resolver) exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
-	// Using a well-known public DNS resolver.
-	// In a real-world scenario, this would come from configuration.
-	upstreamAddr := "8.8.8.8:53"
-	msg, _, err := r.dnsClient.ExchangeContext(ctx, req, upstreamAddr)
-	return msg, err
+	result := r.recursiveResolver.Exchange(ctx, req)
+	if result.Err != nil {
+		// Even if there's an error, the response might contain useful information (e.g., SERVFAIL).
+		// We return both, and the caller can decide how to handle it.
+		return result.Msg, result.Err
+	}
+	return result.Msg, nil
 }
 
 // LookupWithoutCache performs a recursive DNS lookup for a given request, bypassing the cache.

@@ -13,7 +13,7 @@ import (
 func TestResolver_Resolve(t *testing.T) {
 	// Create a new cache and resolver for the test.
 	cfg := config.NewConfig()
-	c := cache.NewCache(cache.DefaultCacheSize, cache.DefaultShards, cfg.PrefetchInterval)
+	c := cache.NewMultiLevelCache(cfg)
 	r := NewResolver(cfg, c)
 
 	// Define the question to test.
