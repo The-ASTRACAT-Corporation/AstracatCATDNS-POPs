@@ -8,7 +8,6 @@ import (
 	"dns-resolver/internal/config"
 
 	"github.com/miekg/dns"
-	extresolver "github.com/nsmithuk/resolver"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -17,7 +16,7 @@ type Resolver struct {
 	config     *config.Config
 	cache      *cache.MultiLevelCache
 	sf         singleflight.Group
-	dnssec     *extresolver.Resolver
+	dnsClient  *dns.Client
 	workerPool *WorkerPool
 }
 
@@ -27,7 +26,7 @@ func NewResolver(cfg *config.Config, c *cache.MultiLevelCache) *Resolver {
 		config:     cfg,
 		cache:      c,
 		sf:         singleflight.Group{},
-		dnssec:     extresolver.NewResolver(),
+		dnsClient:  &dns.Client{Net: "udp", Timeout: cfg.UpstreamTimeout},
 		workerPool: NewWorkerPool(cfg.MaxWorkers),
 	}
 	c.SetResolver(r)
@@ -47,6 +46,7 @@ func (r *Resolver) GetConfig() *config.Config {
 // Resolve performs a recursive DNS lookup for a given request.
 func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 	q := req.Question[0]
+	key := cache.Key(q) // Define key early
 
 	// Check the cache first.
 	if cachedMsg, found, revalidate := r.cache.Get(q); found {
@@ -77,7 +77,6 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, error) 
 	}
 
 	// Use singleflight to ensure only one lookup for a given question is in flight at a time.
-	key := cache.Key(q)
 	res, err, _ := r.sf.Do(key, func() (interface{}, error) {
 		return r.exchange(ctx, req)
 	})
@@ -95,13 +94,13 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, error) 
 	return msg, nil
 }
 
-// exchange is a wrapper around the DNSSEC resolver's Exchange method.
+// exchange performs a DNS lookup using a standard DNS client, forwarding to a public resolver.
 func (r *Resolver) exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
-	result := r.dnssec.Exchange(ctx, req)
-	if result.Err != nil {
-		return nil, result.Err
-	}
-	return result.Msg, nil
+	// Using a well-known public DNS resolver.
+	// In a real-world scenario, this would come from configuration.
+	upstreamAddr := "8.8.8.8:53"
+	msg, _, err := r.dnsClient.ExchangeContext(ctx, req, upstreamAddr)
+	return msg, err
 }
 
 // LookupWithoutCache performs a recursive DNS lookup for a given request, bypassing the cache.
