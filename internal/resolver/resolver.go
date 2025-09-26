@@ -15,14 +15,14 @@ import (
 // Resolver is a recursive DNS resolver.
 type Resolver struct {
 	config     *config.Config
-	cache      *cache.Cache
+	cache      *cache.MultiLevelCache
 	sf         singleflight.Group
 	dnssec     *extresolver.Resolver
 	workerPool *WorkerPool
 }
 
 // NewResolver creates a new resolver instance.
-func NewResolver(cfg *config.Config, c *cache.Cache) *Resolver {
+func NewResolver(cfg *config.Config, c *cache.MultiLevelCache) *Resolver {
 	r := &Resolver{
 		config:     cfg,
 		cache:      c,
@@ -47,10 +47,9 @@ func (r *Resolver) GetConfig() *config.Config {
 // Resolve performs a recursive DNS lookup for a given request.
 func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 	q := req.Question[0]
-	key := cache.Key(q)
 
 	// Check the cache first.
-	if cachedMsg, found, revalidate := r.cache.Get(key); found {
+	if cachedMsg, found, revalidate := r.cache.Get(q); found {
 		log.Printf("Cache hit for %s (revalidate: %t)", q.Name, revalidate)
 		cachedMsg.Id = req.Id
 
@@ -78,6 +77,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, error) 
 	}
 
 	// Use singleflight to ensure only one lookup for a given question is in flight at a time.
+	key := cache.Key(q)
 	res, err, _ := r.sf.Do(key, func() (interface{}, error) {
 		return r.exchange(ctx, req)
 	})
