@@ -29,5 +29,5 @@ git clone https://github.com/ASTRACAT2022/The-ASTRACAT-DNS-Resolver.git
 # Переходим в директорию проекта
 cd The-ASTRACAT-DNS-Resolver
 
-# Запускаем установку
+# Запускаем установку и потом еще раз после генерацыии ключей 
 ./install.sh
