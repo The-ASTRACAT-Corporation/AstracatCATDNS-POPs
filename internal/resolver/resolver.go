@@ -105,8 +105,37 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, error) 
 func (r *Resolver) exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 	result := r.dnssec.Exchange(ctx, req)
 	if result.Err != nil {
+		// Don't log SERVFAIL as a validation error, as it's an expected outcome for bogus domains.
+		if result.Msg == nil || result.Msg.Rcode != dns.RcodeServerFailure {
+			log.Printf("DNSSEC validation error for %s: %v", req.Question[0].Name, result.Err)
+		}
 		return nil, result.Err
 	}
+
+	// The underlying library can incorrectly report unsigned domains as Secure.
+	// We'll implement our own check and ignore the library's `Auth` field.
+	isSecure := false
+	// A secure answer must have at least one RRSIG and one other record.
+	if len(result.Msg.Answer) > 1 {
+		hasRRSIG := false
+		for _, rr := range result.Msg.Answer {
+			if rr.Header().Rrtype == dns.TypeRRSIG {
+				hasRRSIG = true
+				break
+			}
+		}
+		isSecure = hasRRSIG
+	}
+
+	if isSecure {
+		log.Printf("Determined DNSSEC status for %s as Secure (RRSIG found)", req.Question[0].Name)
+	} else {
+		log.Printf("Determined DNSSEC status for %s as Insecure (no RRSIG found or empty answer)", req.Question[0].Name)
+	}
+
+	// Set the Authenticated Data (AD) bit explicitly based on our own check.
+	result.Msg.AuthenticatedData = isSecure
+
 	return result.Msg, nil
 }
 
