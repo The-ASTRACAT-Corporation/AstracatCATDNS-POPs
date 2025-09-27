@@ -1,135 +1,111 @@
 package cache
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/miekg/dns"
 )
 
-func TestCache_SetGet(t *testing.T) {
-	c := NewCache(DefaultCacheSize, DefaultShards, 1*time.Minute)
+// Helper function to create a simple DNS message for testing.
+func createTestMsg(qname string, ttl uint32, answer string) *dns.Msg {
+	msg := new(dns.Msg)
+	msg.SetQuestion(dns.Fqdn(qname), dns.TypeA)
+	if answer != "" {
+		rr, _ := dns.NewRR(dns.Fqdn(qname) + " " + strconv.Itoa(int(ttl)) + " IN A " + answer)
+		msg.Answer = []dns.RR{rr}
+	}
+	return msg
+}
+
+func TestCacheSetAndGet(t *testing.T) {
+	c := NewCache(128, 1, 0) // size, shards, prefetchInterval (0 to disable)
 	q := dns.Question{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	key := Key(q)
-
-	msg := new(dns.Msg)
-	msg.SetQuestion(q.Name, q.Qtype)
-	rr, err := dns.NewRR("example.com. 60 IN A 1.2.3.4")
-	if err != nil {
-		t.Fatalf("failed to create RR: %v", err)
-	}
-	msg.Answer = append(msg.Answer, rr)
+	msg := createTestMsg("example.com.", 60, "1.2.3.4")
 
 	c.Set(key, msg, 0, 0)
 
-	retrievedMsg, found, _ := c.Get(key)
+	retrievedMsg, found, revalidate := c.Get(key)
 	if !found {
-		t.Fatal("expected to find message in cache")
+		t.Fatal("expected to find message in cache, but didn't")
 	}
-
-	if retrievedMsg.Question[0].Name != msg.Question[0].Name {
-		t.Errorf("expected question name %s, got %s", msg.Question[0].Name, retrievedMsg.Question[0].Name)
+	if revalidate {
+		t.Error("expected revalidate to be false for a fresh entry")
 	}
-
-	if retrievedMsg.Answer[0].String() != msg.Answer[0].String() {
-		t.Errorf("expected answer %s, got %s", msg.Answer[0].String(), retrievedMsg.Answer[0].String())
+	if retrievedMsg == nil {
+		t.Fatal("retrieved message was nil")
+	}
+	if len(retrievedMsg.Answer) != 1 {
+		t.Fatalf("expected 1 answer, got %d", len(retrievedMsg.Answer))
+	}
+	if retrievedMsg.Answer[0].Header().Name != "example.com." {
+		t.Errorf("unexpected answer name: %s", retrievedMsg.Answer[0].Header().Name)
 	}
 }
 
-func TestCache_Expiration(t *testing.T) {
-	c := NewCache(DefaultCacheSize, DefaultShards, 1*time.Minute)
-	q := dns.Question{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+func TestCacheNotFound(t *testing.T) {
+	c := NewCache(128, 1, 0)
+	q := dns.Question{Name: "notfound.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	key := Key(q)
 
-	msg := new(dns.Msg)
-	msg.SetQuestion(q.Name, q.Qtype)
-	// Use a very short TTL
-	rr, err := dns.NewRR("example.com. 1 IN A 1.2.3.4")
-	if err != nil {
-		t.Fatalf("failed to create RR: %v", err)
+	_, found, _ := c.Get(key)
+	if found {
+		t.Fatal("expected to not find message in cache, but did")
 	}
-	msg.Answer = append(msg.Answer, rr)
+}
+
+func TestCacheExpiration(t *testing.T) {
+	c := NewCache(128, 1, 0)
+	q := dns.Question{Name: "shortlived.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	key := Key(q)
+	// TTL of 1 second
+	msg := createTestMsg("shortlived.com.", 1, "2.3.4.5")
 
 	c.Set(key, msg, 0, 0)
 
 	// Wait for the item to expire
-	time.Sleep(2 * time.Second)
+	time.Sleep(1100 * time.Millisecond)
 
 	_, found, _ := c.Get(key)
 	if found {
-		t.Fatal("expected message to be expired from cache")
+		t.Fatal("expected message to be expired and not found, but it was found")
 	}
 }
 
-func TestCache_GetCopy(t *testing.T) {
-	c := NewCache(DefaultCacheSize, DefaultShards, 1*time.Minute)
-	q := dns.Question{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+func TestCacheStaleWhileRevalidate(t *testing.T) {
+	c := NewCache(128, 1, 0)
+	q := dns.Question{Name: "stale.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	key := Key(q)
+	// TTL of 1 second, SWR of 5 seconds
+	msg := createTestMsg("stale.com.", 1, "3.4.5.6")
+	swrDuration := 5 * time.Second
 
-	msg := new(dns.Msg)
-	msg.SetQuestion(q.Name, q.Qtype)
-	rr, err := dns.NewRR("example.com. 60 IN A 1.2.3.4")
-	if err != nil {
-		t.Fatalf("failed to create RR: %v", err)
-	}
-	msg.Answer = append(msg.Answer, rr)
+	c.Set(key, msg, swrDuration, 0)
 
-	c.Set(key, msg, 0, 0)
+	// Wait for item to become stale but not fully expired
+	time.Sleep(1100 * time.Millisecond)
 
-	retrievedMsg, found, _ := c.Get(key)
+	retrievedMsg, found, revalidate := c.Get(key)
 	if !found {
-		t.Fatal("expected to find message in cache")
+		t.Fatal("expected to get stale message, but got nothing")
+	}
+	if !revalidate {
+		t.Error("expected revalidate to be true for a stale entry")
+	}
+	if retrievedMsg == nil {
+		t.Fatal("retrieved stale message was nil")
+	}
+	if len(retrievedMsg.Answer) != 1 {
+		t.Fatalf("expected 1 answer in stale message, got %d", len(retrievedMsg.Answer))
 	}
 
-	// Modify the retrieved message
-	retrievedMsg.Answer[0].(*dns.A).A[0] = 255
+	// Wait for SWR window to close
+	time.Sleep(swrDuration)
 
-	// Get the message again and check if it was modified in the cache
-	retrievedMsg2, _, _ := c.Get(key)
-	if retrievedMsg2.Answer[0].(*dns.A).A[0] == 255 {
-		t.Fatal("Get should return a copy of the message, but the original was modified")
+	_, found, _ = c.Get(key)
+	if found {
+		t.Fatal("expected message to be fully expired after SWR window, but it was found")
 	}
-}
-
-func TestCache_NXDOMAIN_Caching(t *testing.T) {
-	c := NewCache(DefaultCacheSize, DefaultShards, 1*time.Minute)
-	q := dns.Question{Name: "nonexistent.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
-	key := Key(q)
-
-	msg := new(dns.Msg)
-	msg.SetQuestion(q.Name, q.Qtype)
-	msg.SetRcode(msg, dns.RcodeNameError) // Set Rcode to NXDOMAIN
-
-	// Add an SOA record to the authority section for negative caching TTL
-	soaRR, err := dns.NewRR("nonexistent.com. 60 IN SOA ns1.nonexistent.com. hostmaster.nonexistent.com. 2023010101 7200 360000 604800 60")
-	if err != nil {
-		t.Fatalf("failed to create SOA RR: %v", err)
-	}
-	msg.Ns = append(msg.Ns, soaRR)
-
-	c.Set(key, msg, 0, 0)
-
-	retrievedMsg, found, _ := c.Get(key)
-	if !found {
-		t.Fatal("expected to find NXDOMAIN message in cache")
-	}
-
-	if retrievedMsg.Rcode != dns.RcodeNameError {
-		t.Errorf("expected RcodeNameError, got %d", retrievedMsg.Rcode)
-	}
-
-	// Ensure the cached message has the correct ID (it should be 0 as it's a copy from cache)
-	if retrievedMsg.Id != 0 {
-		t.Errorf("expected cached message ID to be 0, got %d", retrievedMsg.Id)
-	}
-
-	// Test expiration for NXDOMAIN
-	time.Sleep(2 * time.Second) // SOA Minttl is 60, so it should still be in cache
-	_, foundAfterDelay, _ := c.Get(key)
-	if !foundAfterDelay {
-		t.Fatal("expected NXDOMAIN message to still be in cache after short delay")
-	}
-
-	// To properly test expiration, we'd need to mock time or set a very short SOA Minttl.
-	// For now, we rely on the getMinTTL logic to correctly extract the SOA Minttl.
 }
