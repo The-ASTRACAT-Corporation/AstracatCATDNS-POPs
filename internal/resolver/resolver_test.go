@@ -52,3 +52,90 @@ func TestResolver_Resolve(t *testing.T) {
 		t.Logf(" -> %s", ans.String())
 	}
 }
+
+func TestResolver_Resolve_DNSSEC(t *testing.T) {
+	cfg := config.NewConfig()
+	// Use a longer timeout for DNSSEC queries as they can be slower.
+	cfg.RequestTimeout = 20 * time.Second
+	c := cache.NewCache(cache.DefaultCacheSize, cache.DefaultShards, cfg.PrefetchInterval)
+	r := NewResolver(cfg, c)
+
+	testCases := []struct {
+		name          string
+		domain        string
+		qtype         uint16
+		expectADBit   bool
+		expectRCode   int
+		expectError   bool
+		expectAnswers bool
+	}{
+		{
+			name:          "Secure Domain",
+			domain:        "dnssec.works.",
+			qtype:         dns.TypeA,
+			expectADBit:   true,
+			expectRCode:   dns.RcodeSuccess,
+			expectError:   false,
+			expectAnswers: true,
+		},
+		{
+			name:          "Insecure Domain",
+			domain:        "vatican.va.",
+			qtype:         dns.TypeA,
+			expectADBit:   false,
+			expectRCode:   dns.RcodeSuccess,
+			expectError:   false,
+			expectAnswers: true,
+		},
+		{
+			name:        "Bogus Domain",
+			domain:      "dnssec-failed.org.",
+			qtype:       dns.TypeA,
+			expectADBit: false,
+			// The resolver should return an error for bogus domains.
+			// The underlying library returns an error, which we propagate.
+			expectError: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := new(dns.Msg)
+			req.SetQuestion(tc.domain, tc.qtype)
+			req.SetEdns0(4096, true)
+
+			ctx, cancel := context.WithTimeout(context.Background(), cfg.RequestTimeout)
+			defer cancel()
+
+			msg, err := r.Resolve(ctx, req)
+
+			if tc.expectError {
+				if err == nil {
+					t.Errorf("Expected an error for domain %s, but got none", tc.domain)
+				}
+				// If we expect an error, we don't need to check the message.
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("Resolve() failed for %s: %v", tc.domain, err)
+			}
+
+			if msg == nil {
+				t.Fatalf("Resolve() returned a nil message for %s.", tc.domain)
+			}
+
+			if msg.Rcode != tc.expectRCode {
+				t.Errorf("Expected RCode %s, but got %s", dns.RcodeToString[tc.expectRCode], dns.RcodeToString[msg.Rcode])
+			}
+
+			if msg.AuthenticatedData != tc.expectADBit {
+				t.Errorf("Expected AD bit to be %t, but got %t", tc.expectADBit, msg.AuthenticatedData)
+			}
+
+			if tc.expectAnswers && len(msg.Answer) == 0 {
+				t.Errorf("Expected answers for %s, but got none", tc.domain)
+			}
+		})
+	}
+}
