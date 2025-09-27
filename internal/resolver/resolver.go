@@ -2,13 +2,14 @@ package resolver
 
 import (
 	"context"
+	"errors"
 	"log"
 
 	"dns-resolver/internal/cache"
 	"dns-resolver/internal/config"
 
 	"github.com/miekg/dns"
-	extresolver "github.com/nsmithuk/resolver"
+	"github.com/miekg/unbound"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -17,17 +18,25 @@ type Resolver struct {
 	config     *config.Config
 	cache      *cache.Cache
 	sf         singleflight.Group
-	dnssec     *extresolver.Resolver
+	unbound    *unbound.Unbound
 	workerPool *WorkerPool
 }
 
 // NewResolver creates a new resolver instance.
 func NewResolver(cfg *config.Config, c *cache.Cache) *Resolver {
+	u := unbound.New()
+	// It's recommended to configure a trust anchor for DNSSEC validation.
+	// This could be from a file, or you can use the built-in one.
+	// For simplicity, we'll try to load a standard root key file.
+	if err := u.AddTaFile("/etc/unbound/root.key"); err != nil {
+		log.Printf("Warning: could not load root trust anchor: %v. DNSSEC validation might not be secure.", err)
+	}
+
 	r := &Resolver{
 		config:     cfg,
 		cache:      c,
 		sf:         singleflight.Group{},
-		dnssec:     extresolver.NewResolver(),
+		unbound:    u,
 		workerPool: NewWorkerPool(cfg.MaxWorkers),
 	}
 	c.SetResolver(r)
@@ -101,42 +110,50 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, error) 
 	return msg, nil
 }
 
-// exchange is a wrapper around the DNSSEC resolver's Exchange method.
+// exchange is a wrapper around the unbound resolver's Resolve method.
 func (r *Resolver) exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
-	result := r.dnssec.Exchange(ctx, req)
-	if result.Err != nil {
-		// Don't log SERVFAIL as a validation error, as it's an expected outcome for bogus domains.
-		if result.Msg == nil || result.Msg.Rcode != dns.RcodeServerFailure {
-			log.Printf("DNSSEC validation error for %s: %v", req.Question[0].Name, result.Err)
-		}
-		return nil, result.Err
+	q := req.Question[0]
+
+	// Note: The Go wrapper for libunbound doesn't seem to support passing context for cancellation.
+	result, err := r.unbound.Resolve(q.Name, q.Qtype, q.Qclass)
+	if err != nil {
+		log.Printf("Unbound resolution error for %s: %v", q.Name, err)
+		// When an error occurs, unbound does not return a message.
+		// We'll construct a SERVFAIL to send back to the client.
+		msg := new(dns.Msg)
+		msg.SetRcode(req, dns.RcodeServerFailure)
+		return msg, err
 	}
 
-	// The underlying library can incorrectly report unsigned domains as Secure.
-	// We'll implement our own check and ignore the library's `Auth` field.
-	isSecure := false
-	// A secure answer must have at least one RRSIG and one other record.
-	if len(result.Msg.Answer) > 1 {
-		hasRRSIG := false
-		for _, rr := range result.Msg.Answer {
-			if rr.Header().Rrtype == dns.TypeRRSIG {
-				hasRRSIG = true
-				break
-			}
-		}
-		isSecure = hasRRSIG
+	// Create a new response message from the result.
+	// We need to manually construct the dns.Msg.
+	msg := new(dns.Msg)
+	msg.SetReply(req)
+	msg.Rcode = result.Rcode
+
+	// The unbound result gives us a flat list of RRs. We will add them
+	// to the Answer section.
+	if result.HaveData {
+		msg.Answer = result.Rr
 	}
 
-	if isSecure {
-		log.Printf("Determined DNSSEC status for %s as Secure (RRSIG found)", req.Question[0].Name)
+	if result.Bogus {
+		log.Printf("DNSSEC validation for %s resulted in BOGUS.", q.Name)
+		// The test expects an error for bogus domains. We'll return a SERVFAIL
+		// message that the calling handler can use, along with an error.
+		msg.Rcode = dns.RcodeServerFailure
+		return msg, errors.New("BOGUS: DNSSEC validation failed")
+	} else if result.Secure {
+		log.Printf("DNSSEC validation for %s resulted in SECURE.", q.Name)
+		msg.AuthenticatedData = true
 	} else {
-		log.Printf("Determined DNSSEC status for %s as Insecure (no RRSIG found or empty answer)", req.Question[0].Name)
+		log.Printf("DNSSEC validation for %s resulted in INSECURE.", q.Name)
+		msg.AuthenticatedData = false
 	}
 
-	// Set the Authenticated Data (AD) bit explicitly based on our own check.
-	result.Msg.AuthenticatedData = isSecure
-
-	return result.Msg, nil
+	// Unlike the previous library, unbound doesn't return a fully-formed dns.Msg.
+	// We've constructed it from the pieces in the result.
+	return msg, nil
 }
 
 // LookupWithoutCache performs a recursive DNS lookup for a given request, bypassing the cache.
