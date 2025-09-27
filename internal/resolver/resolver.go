@@ -66,11 +66,17 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, error) 
 				ctx, cancel := context.WithTimeout(context.Background(), r.config.UpstreamTimeout)
 				defer cancel()
 
-				_, err, _ := r.sf.Do(key+"-revalidate", func() (interface{}, error) {
+				res, err, _ := r.sf.Do(key+"-revalidate", func() (interface{}, error) {
 					return r.exchange(ctx, req)
 				})
 				if err != nil {
 					log.Printf("Background revalidation failed for %s: %v", q.Name, err)
+					return
+				}
+
+				if msg, ok := res.(*dns.Msg); ok {
+					r.cache.Set(key, msg, r.config.StaleWhileRevalidate, r.config.PrefetchInterval)
+					log.Printf("Successfully revalidated and updated cache for %s", q.Name)
 				}
 			}()
 		}
