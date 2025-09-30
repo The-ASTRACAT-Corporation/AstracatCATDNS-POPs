@@ -101,11 +101,20 @@ func TestCacheStaleWhileRevalidate(t *testing.T) {
 		t.Fatalf("expected 1 answer in stale message, got %d", len(retrievedMsg.Answer))
 	}
 
-	// Wait for SWR window to close
+	// With the new logic, the item will always be served stale until the resolver
+	// fails to revalidate it and explicitly deletes it.
+	// We will test that it's still available and marked for revalidation after the
+	// original SWR window would have closed.
 	time.Sleep(swrDuration)
 
-	_, found, _ = c.Get(key)
-	if found {
-		t.Fatal("expected message to be fully expired after SWR window, but it was found")
+	retrievedMsg, found, revalidate = c.Get(key)
+	if !found {
+		t.Fatal("expected to find message after SWR window, but it was not found")
+	}
+	if !revalidate {
+		t.Error("expected revalidate to be true for a stale entry even after the original SWR window")
+	}
+	if retrievedMsg == nil {
+		t.Fatal("retrieved stale message was nil after SWR window")
 	}
 }
