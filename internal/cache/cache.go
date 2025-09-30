@@ -183,7 +183,7 @@ func (c *Cache) Get(key string) (*dns.Msg, bool, bool) {
 	// Check if the item is expired
 	if time.Now().After(item.Expiration) {
 		// Item is expired. Check for stale-while-revalidate.
-		if item.StaleWhileRevalidate > 0 && time.Now().Before(item.Expiration.Add(item.StaleWhileRevalidate)) {
+		if item.StaleWhileRevalidate > 0 {
 			// Return stale item, and indicate that a revalidation is needed.
 			copiedMsg := item.Message.Copy()
 			copiedMsg.Id = 0
