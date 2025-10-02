@@ -39,6 +39,10 @@ func NewServer(cfg *config.Config, m *metrics.Metrics, res *resolver.Resolver) *
 
 func (s *Server) buildAndSetHandler() {
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		if len(r.Question) > 0 {
+			s.metrics.RecordQueryType(dns.TypeToString[r.Question[0].Qtype])
+		}
+
 		req := msgPool.Get().(*dns.Msg)
 		defer func() {
 			*req = dns.Msg{}
@@ -55,10 +59,12 @@ func (s *Server) buildAndSetHandler() {
 		msg, err := s.resolver.Resolve(ctx, req)
 		if err != nil {
 			log.Printf("Failed to resolve %s: %v", req.Question[0].Name, err)
+			s.metrics.RecordResponseCode(dns.RcodeToString[dns.RcodeServerFailure])
 			dns.HandleFailed(w, r)
 			return
 		}
 
+		s.metrics.RecordResponseCode(dns.RcodeToString[msg.Rcode])
 		msg.Id = r.Id
 
 		if err := w.WriteMsg(msg); err != nil {
