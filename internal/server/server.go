@@ -4,7 +4,7 @@ import (
 	"context"
 	"log"
 	"sync"
-	"time"
+
 
 	"dns-resolver/internal/config"
 	"dns-resolver/internal/metrics"
