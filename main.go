@@ -34,7 +34,7 @@ func main() {
 
 	// Create cache and resolver
 	c := cache.NewCache(cfg.CacheSize, cache.DefaultShards, cfg.PrefetchInterval)
-	res := resolver.NewResolver(cfg, c)
+	res := resolver.NewResolver(cfg, c, m)
 
 	// Set the resolver in the cache for prefetching
 	c.SetResolver(res)

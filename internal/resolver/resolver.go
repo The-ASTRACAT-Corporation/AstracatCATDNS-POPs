@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"log"
+	"time"
 
 	"dns-resolver/internal/cache"
 	"dns-resolver/internal/config"
+	"dns-resolver/internal/metrics"
 
 	"github.com/miekg/dns"
 	"github.com/miekg/unbound"
@@ -20,10 +22,11 @@ type Resolver struct {
 	sf         singleflight.Group
 	unbound    *unbound.Unbound
 	workerPool *WorkerPool
+	metrics    *metrics.Metrics
 }
 
 // NewResolver creates a new resolver instance.
-func NewResolver(cfg *config.Config, c *cache.Cache) *Resolver {
+func NewResolver(cfg *config.Config, c *cache.Cache, m *metrics.Metrics) *Resolver {
 	u := unbound.New()
 	// It's recommended to configure a trust anchor for DNSSEC validation.
 	// This could be from a file, or you can use the built-in one.
@@ -38,6 +41,7 @@ func NewResolver(cfg *config.Config, c *cache.Cache) *Resolver {
 		sf:         singleflight.Group{},
 		unbound:    u,
 		workerPool: NewWorkerPool(cfg.MaxWorkers),
+		metrics:    m,
 	}
 	c.SetResolver(r)
 	return r
@@ -113,9 +117,15 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, error) 
 // exchange is a wrapper around the unbound resolver's Resolve method.
 func (r *Resolver) exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 	q := req.Question[0]
+	startTime := time.Now()
 
 	// Note: The Go wrapper for libunbound doesn't seem to support passing context for cancellation.
 	result, err := r.unbound.Resolve(q.Name, q.Qtype, q.Qclass)
+	latency := time.Since(startTime)
+
+	// Always record latency
+	r.metrics.RecordLatency(q.Name, latency)
+
 	if err != nil {
 		log.Printf("Unbound resolution error for %s: %v", q.Name, err)
 		// When an error occurs, unbound does not return a message.
@@ -130,6 +140,10 @@ func (r *Resolver) exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, error)
 	msg := new(dns.Msg)
 	msg.SetReply(req)
 	msg.Rcode = result.Rcode
+
+	if result.Rcode == dns.RcodeNameError {
+		r.metrics.RecordNXDOMAIN(q.Name)
+	}
 
 	// The unbound result gives us a flat list of RRs. We will add them
 	// to the Answer section.

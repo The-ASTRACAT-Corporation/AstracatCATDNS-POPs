@@ -4,6 +4,7 @@ import (
 	"context"
 	"dns-resolver/internal/cache"
 	"dns-resolver/internal/config"
+	"dns-resolver/internal/metrics"
 	"testing"
 	"time"
 
@@ -14,7 +15,8 @@ func TestResolver_Resolve(t *testing.T) {
 	// Create a new cache and resolver for the test.
 	cfg := config.NewConfig()
 	c := cache.NewCache(cache.DefaultCacheSize, cache.DefaultShards, cfg.PrefetchInterval)
-	r := NewResolver(cfg, c)
+	m := metrics.NewMetrics()
+	r := NewResolver(cfg, c, m)
 
 	// Define the question to test.
 	req := new(dns.Msg)
@@ -58,7 +60,8 @@ func TestResolver_Resolve_DNSSEC(t *testing.T) {
 	// Use a longer timeout for DNSSEC queries as they can be slower.
 	cfg.RequestTimeout = 20 * time.Second
 	c := cache.NewCache(cache.DefaultCacheSize, cache.DefaultShards, cfg.PrefetchInterval)
-	r := NewResolver(cfg, c)
+	m := metrics.NewMetrics()
+	r := NewResolver(cfg, c, m)
 
 	testCases := []struct {
 		name          string

@@ -40,6 +40,69 @@
                     <p id="cache-protected">0</p>
                 </div>
             </div>
+            <div class="system-stats">
+                <h3>System Resources</h3>
+                <div class="stats">
+                    <div class="stat-box">
+                        <h4>CPU Usage</h4>
+                        <p id="cpu-usage">0%</p>
+                    </div>
+                    <div class="stat-box">
+                        <h4>Memory Usage</h4>
+                        <p id="mem-usage">0%</p>
+                    </div>
+                    <div class="stat-box">
+                        <h4>Goroutines</h4>
+                        <p id="goroutines">0</p>
+                    </div>
+                </div>
+                <div class="charts">
+                    <div class="chart-container">
+                        <h3>CPU Usage (Last 60s)</h3>
+                        <canvas id="cpu-chart"></canvas>
+                    </div>
+                    <div class="chart-container">
+                        <h3>Memory Usage (Last 60s)</h3>
+                        <canvas id="mem-chart"></canvas>
+                    </div>
+                </div>
+            </div>
+            <div class="top-domains">
+                <div class="top-list">
+                    <h3>Top NXDOMAIN Domains</h3>
+                    <table id="nx-domains-table">
+                        <thead>
+                            <tr>
+                                <th>Domain</th>
+                                <th>Count</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+                <div class="top-list">
+                    <h3>Top Latency Domains</h3>
+                    <table id="latency-domains-table">
+                        <thead>
+                            <tr>
+                                <th>Domain</th>
+                                <th>Avg Latency (ms)</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="charts">
+                <div class="chart-container">
+                    <h3>Query Types</h3>
+                    <canvas id="query-types-chart"></canvas>
+                </div>
+                <div class="chart-container">
+                    <h3>Response Codes</h3>
+                    <canvas id="response-codes-chart"></canvas>
+                </div>
+            </div>
         </main>
     </div>
     <script src="app.js"></script>
