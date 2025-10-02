@@ -1,24 +1,71 @@
 package server
 
 import (
+	"context"
 	"log"
+	"sync"
+	"time"
 
 	"dns-resolver/internal/config"
+	"dns-resolver/internal/metrics"
+	"dns-resolver/internal/resolver"
 	"github.com/miekg/dns"
 )
 
+var msgPool = sync.Pool{
+	New: func() interface{} {
+		return new(dns.Msg)
+	},
+}
+
 // Server holds the server state.
 type Server struct {
-	config  *config.Config
-	handler dns.Handler
+	config   *config.Config
+	handler  dns.Handler
+	metrics  *metrics.Metrics
+	resolver *resolver.Resolver
 }
 
 // NewServer creates a new server.
-func NewServer(cfg *config.Config) *Server {
+func NewServer(cfg *config.Config, m *metrics.Metrics, res *resolver.Resolver) *Server {
 	s := &Server{
-		config: cfg,
+		config:   cfg,
+		metrics:  m,
+		resolver: res,
 	}
+	s.buildAndSetHandler()
 	return s
+}
+
+func (s *Server) buildAndSetHandler() {
+	handler := dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		req := msgPool.Get().(*dns.Msg)
+		defer func() {
+			*req = dns.Msg{}
+			msgPool.Put(req)
+		}()
+
+		req.SetQuestion(r.Question[0].Name, r.Question[0].Qtype)
+		req.RecursionDesired = true
+		req.SetEdns0(4096, true)
+
+		ctx, cancel := context.WithTimeout(context.Background(), s.config.RequestTimeout)
+		defer cancel()
+
+		msg, err := s.resolver.Resolve(ctx, req)
+		if err != nil {
+			log.Printf("Failed to resolve %s: %v", req.Question[0].Name, err)
+			dns.HandleFailed(w, r)
+			return
+		}
+
+		msg.Id = r.Id
+
+		if err := w.WriteMsg(msg); err != nil {
+			log.Printf("Failed to write response: %v", err)
+		}
+	})
+	s.handler = s.metricsWrapper(handler)
 }
 
 // ListenAndServe starts the DNS server.
@@ -38,8 +85,10 @@ func (s *Server) startListener(net string) {
 	}
 }
 
-// SetHandler allows replacing the default handler.
-// This will be used to inject the resolver logic later.
-func (s *Server) SetHandler(handler dns.Handler) {
-	s.handler = handler
+// metricsWrapper is a middleware that increments the query counter.
+func (s *Server) metricsWrapper(h dns.Handler) dns.Handler {
+	return dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		s.metrics.IncrementQueries()
+		h.ServeDNS(w, r)
+	})
 }

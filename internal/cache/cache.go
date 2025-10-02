@@ -319,3 +319,15 @@ func (s *slruSegment) accessItem(item *CacheItem) {
 		s.protectedList.MoveToFront(item.element)
 	}
 }
+
+// GetCacheSize returns the number of items in the probation and protected segments.
+func (c *Cache) GetCacheSize() (int, int) {
+	var probationSize, protectedSize int
+	for _, shard := range c.shards {
+		shard.RLock()
+		probationSize += shard.probationList.Len()
+		protectedSize += shard.protectedList.Len()
+		shard.RUnlock()
+	}
+	return probationSize, protectedSize
+}
