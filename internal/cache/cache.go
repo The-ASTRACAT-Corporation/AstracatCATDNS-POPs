@@ -205,6 +205,11 @@ func (c *Cache) Get(key string) (*dns.Msg, bool, bool) {
 
 // Set adds a message to the cache.
 func (c *Cache) Set(key string, msg *dns.Msg, swr, prefetch time.Duration) {
+	// Do not cache responses with SERVFAIL or NXDOMAIN RCODEs.
+	if msg.Rcode == dns.RcodeServerFailure || msg.Rcode == dns.RcodeNameError {
+		return
+	}
+
 	shard := c.getShard(key)
 	shard.Lock()
 	defer shard.Unlock()
