@@ -33,7 +33,8 @@ func main() {
 	m := metrics.NewMetrics()
 
 	// Create cache and resolver
-	c := cache.NewCache(cfg.CacheSize, cache.DefaultShards, cfg.PrefetchInterval)
+	c := cache.NewCache(cfg.CacheSize, cache.DefaultShards, cfg.PrefetchInterval, cfg.LMDBPath)
+	defer c.Close()
 	res := resolver.NewResolver(cfg, c, m)
 
 	// Set the resolver in the cache for prefetching

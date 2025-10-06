@@ -79,8 +79,16 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, error) 
 				ctx, cancel := context.WithTimeout(context.Background(), r.config.UpstreamTimeout)
 				defer cancel()
 
+				// Create a new request for revalidation to avoid race conditions on the original request object.
+				revalidationReq := new(dns.Msg)
+				revalidationReq.SetQuestion(q.Name, q.Qtype)
+				revalidationReq.RecursionDesired = true
+				if opt := req.IsEdns0(); opt != nil {
+					revalidationReq.SetEdns0(opt.UDPSize(), opt.Do())
+				}
+
 				res, err, _ := r.sf.Do(key+"-revalidate", func() (interface{}, error) {
-					return r.exchange(ctx, req)
+					return r.exchange(ctx, revalidationReq)
 				})
 				if err != nil {
 					log.Printf("Background revalidation failed for %s: %v", q.Name, err)
