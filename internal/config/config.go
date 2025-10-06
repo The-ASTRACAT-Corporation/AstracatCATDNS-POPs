@@ -16,6 +16,7 @@ type Config struct {
 	CacheMinTTL          time.Duration
 	StaleWhileRevalidate time.Duration
 	PrefetchInterval     time.Duration
+	LMDBPath             string
 }
 
 // NewConfig returns a new Config with default values.
@@ -33,5 +34,6 @@ func NewConfig() *Config {
 		CacheMinTTL:          60 * time.Second,
 		StaleWhileRevalidate: 1 * time.Minute,
 		PrefetchInterval:     30 * time.Second,
+		LMDBPath:             "/tmp/dns_cache.lmdb",
 	}
 }

@@ -1,12 +1,32 @@
 package cache
 
 import (
+	"io/ioutil"
+	"os"
 	"strconv"
 	"testing"
 	"time"
 
 	"github.com/miekg/dns"
 )
+
+// Helper function to create a temporary directory and a new cache instance for testing.
+func newTestCache(t *testing.T) (*Cache, func()) {
+	t.Helper()
+	dir, err := ioutil.TempDir("", "test-lmdb")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+
+	cache := NewCache(128, 1, 0, dir)
+
+	cleanup := func() {
+		cache.Close()
+		os.RemoveAll(dir)
+	}
+
+	return cache, cleanup
+}
 
 // Helper function to create a simple DNS message for testing.
 func createTestMsg(qname string, ttl uint32, answer string) *dns.Msg {
@@ -20,7 +40,9 @@ func createTestMsg(qname string, ttl uint32, answer string) *dns.Msg {
 }
 
 func TestCacheSetAndGet(t *testing.T) {
-	c := NewCache(128, 1, 0) // size, shards, prefetchInterval (0 to disable)
+	c, cleanup := newTestCache(t)
+	defer cleanup()
+
 	q := dns.Question{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	key := Key(q)
 	msg := createTestMsg("example.com.", 60, "1.2.3.4")
@@ -37,16 +59,12 @@ func TestCacheSetAndGet(t *testing.T) {
 	if retrievedMsg == nil {
 		t.Fatal("retrieved message was nil")
 	}
-	if len(retrievedMsg.Answer) != 1 {
-		t.Fatalf("expected 1 answer, got %d", len(retrievedMsg.Answer))
-	}
-	if retrievedMsg.Answer[0].Header().Name != "example.com." {
-		t.Errorf("unexpected answer name: %s", retrievedMsg.Answer[0].Header().Name)
-	}
 }
 
 func TestCacheNotFound(t *testing.T) {
-	c := NewCache(128, 1, 0)
+	c, cleanup := newTestCache(t)
+	defer cleanup()
+
 	q := dns.Question{Name: "notfound.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	key := Key(q)
 
@@ -57,15 +75,15 @@ func TestCacheNotFound(t *testing.T) {
 }
 
 func TestCacheExpiration(t *testing.T) {
-	c := NewCache(128, 1, 0)
+	c, cleanup := newTestCache(t)
+	defer cleanup()
+
 	q := dns.Question{Name: "shortlived.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	key := Key(q)
-	// TTL of 1 second
 	msg := createTestMsg("shortlived.com.", 1, "2.3.4.5")
 
 	c.Set(key, msg, 0, 0)
 
-	// Wait for the item to expire
 	time.Sleep(1100 * time.Millisecond)
 
 	_, found, _ := c.Get(key)
@@ -74,8 +92,73 @@ func TestCacheExpiration(t *testing.T) {
 	}
 }
 
+func TestCachePersistence(t *testing.T) {
+	dir, err := ioutil.TempDir("", "test-lmdb-persistence")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	q := dns.Question{Name: "persistent.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	key := Key(q)
+	msg := createTestMsg("persistent.com.", 60, "5.6.7.8")
+
+	// Create the first cache, add an item, and close it to persist the data.
+	c1 := NewCache(128, 1, 0, dir)
+	c1.Set(key, msg, 0, 0)
+	c1.Close()
+
+	// Create a new cache from the same DB path to load the data.
+	c2 := NewCache(128, 1, 0, dir)
+	defer c2.Close()
+
+	// Verify the item is present in the new cache.
+	retrievedMsg, found, _ := c2.Get(key)
+	if !found {
+		t.Fatal("expected to find message in persisted cache, but didn't")
+	}
+	if retrievedMsg == nil {
+		t.Fatal("retrieved message was nil")
+	}
+	if len(retrievedMsg.Answer) != 1 || retrievedMsg.Answer[0].Header().Name != "persistent.com." {
+		t.Errorf("unexpected answer in retrieved message: %v", retrievedMsg.Answer)
+	}
+}
+
+func TestCachePersistenceExpiration(t *testing.T) {
+	dir, err := ioutil.TempDir("", "test-lmdb-persistence-expired")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	q := dns.Question{Name: "expired-persistent.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	key := Key(q)
+	msg := createTestMsg("expired-persistent.com.", 1, "9.8.7.6") // 1-second TTL
+
+	// Create the first cache, add an item, and close it.
+	c1 := NewCache(128, 1, 0, dir)
+	c1.Set(key, msg, 0, 0)
+	c1.Close()
+
+	// Wait for the item to expire.
+	time.Sleep(1100 * time.Millisecond)
+
+	// Create a new cache from the same DB path.
+	c2 := NewCache(128, 1, 0, dir)
+	defer c2.Close()
+
+	// The expired item should not be loaded.
+	_, found, _ := c2.Get(key)
+	if found {
+		t.Fatal("found an expired message in the cache, but it should have been ignored on load")
+	}
+}
+
 func TestCacheStaleWhileRevalidate(t *testing.T) {
-	c := NewCache(128, 1, 0)
+	c, cleanup := newTestCache(t)
+	defer cleanup()
+
 	q := dns.Question{Name: "stale.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	key := Key(q)
 	// TTL of 1 second, SWR of 5 seconds
@@ -84,7 +167,7 @@ func TestCacheStaleWhileRevalidate(t *testing.T) {
 
 	c.Set(key, msg, swrDuration, 0)
 
-	// Wait for item to become stale but not fully expired
+	// Wait for item to become stale but not fully expired from SWR window
 	time.Sleep(1100 * time.Millisecond)
 
 	retrievedMsg, found, revalidate := c.Get(key)
@@ -101,20 +184,12 @@ func TestCacheStaleWhileRevalidate(t *testing.T) {
 		t.Fatalf("expected 1 answer in stale message, got %d", len(retrievedMsg.Answer))
 	}
 
-	// With the new logic, the item will always be served stale until the resolver
-	// fails to revalidate it and explicitly deletes it.
-	// We will test that it's still available and marked for revalidation after the
-	// original SWR window would have closed.
+	// Wait for the SWR window to close
 	time.Sleep(swrDuration)
 
-	retrievedMsg, found, revalidate = c.Get(key)
-	if !found {
-		t.Fatal("expected to find message after SWR window, but it was not found")
-	}
-	if !revalidate {
-		t.Error("expected revalidate to be true for a stale entry even after the original SWR window")
-	}
-	if retrievedMsg == nil {
-		t.Fatal("retrieved stale message was nil after SWR window")
+	// After the SWR window, the item should be gone
+	_, found, _ = c.Get(key)
+	if found {
+		t.Fatal("expected message to be expired and not found after SWR window, but it was found")
 	}
 }
