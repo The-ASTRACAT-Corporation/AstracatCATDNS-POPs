@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"container/list"
 	"context"
-	"encoding/gob"
+	"encoding/binary"
 	"fmt"
 	"log"
 	"os"
@@ -24,6 +24,85 @@ type persistentCacheItem struct {
 	Expiration           time.Time
 	StaleWhileRevalidate time.Duration
 	Prefetch             time.Duration
+}
+
+// FixedSizeCacheItem represents the cache item with fixed-size metadata
+type FixedSizeCacheItem struct {
+	ExpirationUnix          int64
+	StaleWhileRevalidateNanoseconds int64
+	PrefetchNanoseconds     int64
+	MsgBytesLength          uint32
+	MsgBytes                []byte
+}
+
+// Pack serializes the FixedSizeCacheItem into bytes
+func (f *FixedSizeCacheItem) Pack() ([]byte, error) {
+	buf := new(bytes.Buffer)
+	
+	// Write fixed-size metadata
+	err := binary.Write(buf, binary.BigEndian, f.ExpirationUnix)
+	if err != nil {
+		return nil, err
+	}
+	err = binary.Write(buf, binary.BigEndian, f.StaleWhileRevalidateNanoseconds)
+	if err != nil {
+		return nil, err
+	}
+	err = binary.Write(buf, binary.BigEndian, f.PrefetchNanoseconds)
+	if err != nil {
+		return nil, err
+	}
+	err = binary.Write(buf, binary.BigEndian, f.MsgBytesLength)
+	if err != nil {
+		return nil, err
+	}
+	
+	// Write variable-length message bytes
+	_, err = buf.Write(f.MsgBytes)
+	if err != nil {
+		return nil, err
+	}
+	
+	return buf.Bytes(), nil
+}
+
+// Unpack deserializes bytes into FixedSizeCacheItem
+func (f *FixedSizeCacheItem) Unpack(data []byte) error {
+	if len(data) < 32 { // 8*4 bytes for the fixed-size fields
+		return fmt.Errorf("data too short")
+	}
+	
+	buf := bytes.NewReader(data)
+	
+	err := binary.Read(buf, binary.BigEndian, &f.ExpirationUnix)
+	if err != nil {
+		return err
+	}
+	err = binary.Read(buf, binary.BigEndian, &f.StaleWhileRevalidateNanoseconds)
+	if err != nil {
+		return err
+	}
+	err = binary.Read(buf, binary.BigEndian, &f.PrefetchNanoseconds)
+	if err != nil {
+		return err
+	}
+	err = binary.Read(buf, binary.BigEndian, &f.MsgBytesLength)
+	if err != nil {
+		return err
+	}
+	
+	remaining := buf.Len()
+	if uint32(remaining) < f.MsgBytesLength {
+		return fmt.Errorf("message bytes length mismatch")
+	}
+	
+	f.MsgBytes = make([]byte, f.MsgBytesLength)
+	_, err = buf.Read(f.MsgBytes)
+	if err != nil {
+		return err
+	}
+	
+	return nil
 }
 
 // CacheItem represents an item in the cache.
@@ -155,29 +234,32 @@ func (c *Cache) loadFromDB() {
 				return err
 			}
 
-			var pItem persistentCacheItem
-			buffer := bytes.NewBuffer(val)
-			decoder := gob.NewDecoder(buffer)
-			if err := decoder.Decode(&pItem); err != nil {
-				log.Printf("Failed to decode cache item for key %s: %v", string(key), err)
+			var fItem FixedSizeCacheItem
+			if err := fItem.Unpack(val); err != nil {
+				log.Printf("Failed to unpack cache item for key %s: %v", string(key), err)
 				continue
 			}
 
-			if time.Now().After(pItem.Expiration) {
+			expiration := time.Unix(fItem.ExpirationUnix, 0)
+			if time.Now().After(expiration) {
 				continue
 			}
 
 			msg := new(dns.Msg)
-			if err := msg.Unpack(pItem.MsgBytes); err != nil {
+			if err := msg.Unpack(fItem.MsgBytes); err != nil {
 				log.Printf("Failed to unpack DNS message for key %s: %v", string(key), err)
 				continue
 			}
 
-			evictedKey := c.setInMemory(string(key), msg, pItem.StaleWhileRevalidate, pItem.Prefetch, pItem.Expiration)
+			evictedKey := c.setInMemory(string(key), msg, 
+				time.Duration(fItem.StaleWhileRevalidateNanoseconds), 
+				time.Duration(fItem.PrefetchNanoseconds), 
+				expiration)
 			if evictedKey != "" {
 				c.deleteFromDB(evictedKey)
 			}
 		}
+		return nil
 	})
 	if err != nil {
 		log.Printf("Error loading cache from LMDB: %v", err)
@@ -191,22 +273,22 @@ func (c *Cache) writeToDB(key string, msg *dns.Msg, expiration time.Time, swr, p
 		return
 	}
 
-	pItem := persistentCacheItem{
-		MsgBytes:             packedMsg,
-		Expiration:           expiration,
-		StaleWhileRevalidate: swr,
-		Prefetch:             prefetch,
+	fItem := FixedSizeCacheItem{
+		ExpirationUnix:                  expiration.Unix(),
+		StaleWhileRevalidateNanoseconds: int64(swr),
+		PrefetchNanoseconds:             int64(prefetch),
+		MsgBytesLength:                  uint32(len(packedMsg)),
+		MsgBytes:                        packedMsg,
 	}
 
-	var buffer bytes.Buffer
-	encoder := gob.NewEncoder(&buffer)
-	if err := encoder.Encode(pItem); err != nil {
-		log.Printf("Failed to encode cache item for key %s: %v", key, err)
+	packedData, err := fItem.Pack()
+	if err != nil {
+		log.Printf("Failed to pack cache item for key %s: %v", key, err)
 		return
 	}
 
 	err = c.lmdbEnv.Update(func(txn *lmdb.Txn) error {
-		return txn.Put(c.lmdbDBI, []byte(key), buffer.Bytes(), 0)
+		return txn.Put(c.lmdbDBI, []byte(key), packedData, 0)
 	})
 	if err != nil {
 		log.Printf("Failed to write to LMDB for key %s: %v", key, err)
