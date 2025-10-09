@@ -107,7 +107,8 @@ func (f *FixedSizeCacheItem) Unpack(data []byte) error {
 
 // CacheItem represents an item in the cache.
 type CacheItem struct {
-	Message              *dns.Msg
+	MsgBytes             []byte
+	Question             dns.Question
 	Expiration           time.Time
 	StaleWhileRevalidate time.Duration
 	Prefetch             time.Duration
@@ -251,9 +252,9 @@ func (c *Cache) loadFromDB() {
 				continue
 			}
 
-			evictedKey := c.setInMemory(string(key), msg, 
-				time.Duration(fItem.StaleWhileRevalidateNanoseconds), 
-				time.Duration(fItem.PrefetchNanoseconds), 
+			evictedKey := c.setInMemory(string(key), fItem.MsgBytes, msg.Question[0],
+				time.Duration(fItem.StaleWhileRevalidateNanoseconds),
+				time.Duration(fItem.PrefetchNanoseconds),
 				expiration)
 			if evictedKey != "" {
 				c.deleteFromDB(evictedKey)
@@ -314,11 +315,21 @@ func (c *Cache) Get(key string) (*dns.Msg, bool, bool) {
 		return nil, false, false
 	}
 
+	msg := new(dns.Msg)
+	if err := msg.Unpack(item.MsgBytes); err != nil {
+		log.Printf("Failed to unpack message from in-memory cache for key %s: %v", key, err)
+		// Consider removing the corrupted item
+		evictedKey := shard.removeItem(item)
+		if evictedKey != "" {
+			c.deleteFromDB(evictedKey)
+		}
+		return nil, false, false
+	}
+
 	if time.Now().After(item.Expiration) {
 		if item.StaleWhileRevalidate > 0 && time.Now().Before(item.Expiration.Add(item.StaleWhileRevalidate)) {
-			copiedMsg := item.Message.Copy()
-			copiedMsg.Id = 0
-			return copiedMsg, true, true
+			msg.Id = 0
+			return msg, true, true
 		}
 		evictedKey := shard.removeItem(item)
 		if evictedKey != "" {
@@ -332,9 +343,8 @@ func (c *Cache) Get(key string) (*dns.Msg, bool, bool) {
 		c.deleteFromDB(evictedKey)
 	}
 
-	copiedMsg := item.Message.Copy()
-	copiedMsg.Id = 0
-	return copiedMsg, true, false
+	msg.Id = 0
+	return msg, true, false
 }
 
 func (c *Cache) Set(key string, msg *dns.Msg, swr, prefetch time.Duration) {
@@ -347,19 +357,26 @@ func (c *Cache) Set(key string, msg *dns.Msg, swr, prefetch time.Duration) {
 
 	c.writeToDB(key, msg, expiration, swr, prefetch)
 
-	evictedKey := c.setInMemory(key, msg, swr, prefetch, expiration)
+	packedMsg, err := msg.Pack()
+	if err != nil {
+		log.Printf("Failed to pack DNS message for in-memory cache, key %s: %v", key, err)
+		return
+	}
+
+	evictedKey := c.setInMemory(key, packedMsg, msg.Question[0], swr, prefetch, expiration)
 	if evictedKey != "" && evictedKey != key {
 		c.deleteFromDB(evictedKey)
 	}
 }
 
-func (c *Cache) setInMemory(key string, msg *dns.Msg, swr, prefetch time.Duration, expiration time.Time) string {
+func (c *Cache) setInMemory(key string, msgBytes []byte, question dns.Question, swr, prefetch time.Duration, expiration time.Time) string {
 	shard := c.getShard(key)
 	shard.Lock()
 	defer shard.Unlock()
 
 	if existingItem, found := shard.items[key]; found {
-		existingItem.Message = msg.Copy()
+		existingItem.MsgBytes = msgBytes
+		existingItem.Question = question
 		existingItem.Expiration = expiration
 		existingItem.StaleWhileRevalidate = swr
 		existingItem.Prefetch = prefetch
@@ -375,7 +392,8 @@ func (c *Cache) setInMemory(key string, msg *dns.Msg, swr, prefetch time.Duratio
 	}
 
 	item := &CacheItem{
-		Message:              msg.Copy(),
+		MsgBytes:             msgBytes,
+		Question:             question,
 		Expiration:           expiration,
 		StaleWhileRevalidate: swr,
 		Prefetch:             prefetch,
@@ -469,7 +487,7 @@ func (c *Cache) checkAndPrefetch() {
 		shard.RLock()
 		for key, item := range shard.items {
 			if item.Prefetch > 0 && time.Now().Add(item.Prefetch).After(item.Expiration) {
-				go c.performPrefetch(key, item.Message.Question[0])
+				go c.performPrefetch(key, item.Question)
 			}
 		}
 		shard.RUnlock()
