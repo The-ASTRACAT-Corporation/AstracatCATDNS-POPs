@@ -33,4 +33,3 @@ require (
 	google.golang.org/protobuf v1.36.8 // indirect
 )
 
-replace dns-resolver => /Users/astracat/Astracat-DNS-Resolver

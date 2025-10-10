@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"log"
+	"net/http"
 	"runtime"
 	"sync"
 	"time"
