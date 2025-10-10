@@ -1,8 +1,126 @@
 # 🐱 ASTRACAT DNS Resolver
 
-**ASTRACAT DNS Resolver** — это быстрый и лёгкий рекурсивный DNS-резолвер, написанный на Go.  
-Он ориентирован на высокую производительность и простоту, с минималистичной архитектурой и мощным кэшем.  
-Резолвер сам выполняет полную рекурсию, начиная с корневых серверов.
+A high-performance DNS resolver with caching, prefetching, and metrics.
+
+### Features
+
+- Recursive DNS resolution
+- SLRU cache with prefetching
+- Stale-while-revalidate caching strategy
+- DNSSEC validation
+- Prometheus metrics
+- Worker pool for concurrent resolution
+
+### Installation
+
+```bash
+./install.sh
+```
+
+### Usage
+
+```bash
+./astracat-dns
+```
+
+The resolver will listen on port 5053 by default.
+
+### Configuration
+
+Configuration is currently hardcoded in `internal/config/config.go`. Future versions will support configuration files.
+
+### Prometheus и Grafana интеграция
+
+DNS-резолвер имеет встроенную поддержку Prometheus для мониторинга производительности и состояния. Метрики доступны по адресу `http://localhost:9090/metrics`.
+
+#### Настройка Prometheus
+
+1. Установите Prometheus, если он еще не установлен:
+   ```bash
+   # Для macOS
+   brew install prometheus
+   
+   # Для Ubuntu/Debian
+   sudo apt-get install prometheus
+   ```
+
+2. Добавьте следующую конфигурацию в ваш файл `prometheus.yml`:
+   ```yaml
+   scrape_configs:
+     - job_name: 'astracat-dns'
+       scrape_interval: 15s
+       static_configs:
+         - targets: ['localhost:9090']
+   ```
+
+3. Запустите Prometheus:
+   ```bash
+   prometheus --config.file=prometheus.yml
+   ```
+
+#### Настройка Grafana
+
+1. Установите Grafana, если она еще не установлена:
+   ```bash
+   # Для macOS
+   brew install grafana
+   
+   # Для Ubuntu/Debian
+   sudo apt-get install grafana
+   ```
+
+2. Запустите Grafana:
+   ```bash
+   # Для macOS
+   brew services start grafana
+   
+   # Для Ubuntu/Debian
+   sudo systemctl start grafana-server
+   ```
+
+3. Откройте Grafana в браузере по адресу `http://localhost:3000` (логин/пароль по умолчанию: admin/admin)
+
+4. Добавьте Prometheus как источник данных:
+   - Перейдите в "Configuration" -> "Data Sources" -> "Add data source"
+   - Выберите "Prometheus"
+   - Укажите URL: `http://localhost:9100` (или другой порт, на котором запущен Prometheus)
+   - Нажмите "Save & Test"
+
+5. Импортируйте дашборд:
+   - Перейдите в "Create" -> "Import"
+   - Создайте новый дашборд с панелями для следующих метрик:
+     - `dns_resolver_qps` - запросы в секунду
+     - `dns_resolver_total_queries` - общее количество запросов
+     - `dns_resolver_cache_probation_size` и `dns_resolver_cache_protected_size` - размер кэша
+     - `dns_resolver_query_types_total` - типы запросов
+     - `dns_resolver_response_codes_total` - коды ответов
+     - `dns_resolver_top_latency_domains_ms` - домены с наибольшей задержкой
+     - `dns_resolver_cpu_usage_percent` и `dns_resolver_memory_usage_percent` - использование ресурсов
+
+### Доступные метрики
+
+- **Основные метрики**:
+  - `dns_resolver_qps` - запросы в секунду
+  - `dns_resolver_total_queries` - общее количество запросов
+  - `dns_resolver_cache_probation_size` - размер пробного сегмента кэша
+  - `dns_resolver_cache_protected_size` - размер защищенного сегмента кэша
+
+- **Метрики производительности**:
+  - `dns_resolver_cpu_usage_percent` - использование CPU
+  - `dns_resolver_memory_usage_percent` - использование памяти
+  - `dns_resolver_goroutine_count` - количество горутин
+  - `dns_resolver_network_sent_bytes` - отправлено байт по сети
+  - `dns_resolver_network_recv_bytes` - получено байт по сети
+
+- **DNS-специфичные метрики**:
+  - `dns_resolver_top_nx_domains` - домены с NXDOMAIN ответами
+  - `dns_resolver_top_latency_domains_ms` - домены с наибольшей задержкой
+  - `dns_resolver_query_types_total` - типы запросов
+  - `dns_resolver_response_codes_total` - коды ответов
+
+### License
+
+MIT
 <img width="1980" height="1180" alt="cd118a5a-a7a2-402d-9159-960b177a241b" src="https://github.com/user-attachments/assets/9a05ce2e-16ae-4f55-9074-117002e3f09f" />
 
 ---

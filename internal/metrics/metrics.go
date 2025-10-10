@@ -8,6 +8,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/mem"
 	"github.com/shirou/gopsutil/v3/net"
@@ -28,6 +29,7 @@ type Metrics struct {
 	topLatencyDomains sync.Map // map[string]LatencyStat
 	queryTypes        sync.Map // map[string]int64
 	responseCodes     sync.Map // map[string]int64
+	registry          *prometheus.Registry
 }
 
 var (
@@ -91,14 +93,40 @@ var (
 // NewMetrics returns the singleton instance of Metrics.
 func NewMetrics() *Metrics {
 	once.Do(func() {
+		registry := prometheus.NewRegistry()
+		registry.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
+		registry.MustRegister(prometheus.NewGoCollector())
+		
 		instance = &Metrics{
 			startTime: time.Now(),
+			registry:  registry,
 		}
 		go instance.qpsCalculator()
 		go instance.systemMetricsCollector()
 		go instance.topDomainsProcessor()
 	})
 	return instance
+}
+
+// StartMetricsServer starts an HTTP server for Prometheus metrics.
+func (m *Metrics) StartMetricsServer(addr string) {
+	http.Handle("/metrics", promhttp.HandlerFor(
+		prometheus.DefaultGatherer,
+		promhttp.HandlerOpts{
+			EnableOpenMetrics: true,
+		},
+	))
+	
+	// Добавляем эндпоинт для проверки здоровья
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+	
+	log.Printf("Metrics server starting on %s", addr)
+	if err := http.ListenAndServe(addr, nil); err != nil {
+		log.Fatalf("Failed to start metrics server: %v", err)
+	}
 }
 
 // IncrementQueries increments the total number of queries.

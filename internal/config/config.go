@@ -6,6 +6,8 @@ import "time"
 type Config struct {
 	ListenAddr           string
 	MetricsAddr          string
+	PrometheusEnabled    bool
+	PrometheusNamespace  string
 	UpstreamTimeout      time.Duration
 	RequestTimeout       time.Duration
 	MaxWorkers           int
@@ -24,6 +26,8 @@ func NewConfig() *Config {
 	return &Config{
 		ListenAddr:           "0.0.0.0:5053",
 		MetricsAddr:          "0.0.0.0:9090",
+		PrometheusEnabled:    true,
+		PrometheusNamespace:  "dns_resolver",
 		UpstreamTimeout:      5 * time.Second,
 		RequestTimeout:       5 * time.Second,
 		MaxWorkers:           100,

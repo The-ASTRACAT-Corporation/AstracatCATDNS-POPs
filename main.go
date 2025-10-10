@@ -14,13 +14,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-func startMetricsServer(addr string) {
-	http.Handle("/metrics", promhttp.Handler())
-	log.Printf("Metrics server starting on %s", addr)
-	if err := http.ListenAndServe(addr, nil); err != nil {
-		log.Fatalf("Failed to start metrics server: %v", err)
-	}
-}
+// Старая функция больше не используется, так как теперь используем метод из пакета metrics
 
 func main() {
 	// Open a file for logging. Truncate the file if it already exists.
@@ -60,7 +54,7 @@ func main() {
 	}()
 
 	// Start the metrics server
-	go startMetricsServer(cfg.MetricsAddr)
+	go m.StartMetricsServer(cfg.MetricsAddr)
 
 	// Create and start the server
 	srv := server.NewServer(cfg, m, res)
