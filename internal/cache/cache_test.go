@@ -1,7 +1,7 @@
 package cache
 
 import (
-	"io/ioutil"
+	"dns-resolver/internal/metrics"
 	"os"
 	"strconv"
 	"testing"
@@ -13,12 +13,13 @@ import (
 // Helper function to create a temporary directory and a new cache instance for testing.
 func newTestCache(t *testing.T) (*Cache, func()) {
 	t.Helper()
-	dir, err := ioutil.TempDir("", "test-lmdb")
+	dir, err := os.MkdirTemp("", "test-lmdb")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 
-	cache := NewCache(128, 1, 0, dir)
+	m := metrics.NewMetrics()
+	cache := NewCache(128, 1, 0, dir, m)
 
 	cleanup := func() {
 		cache.Close()
@@ -93,7 +94,7 @@ func TestCacheExpiration(t *testing.T) {
 }
 
 func TestCachePersistence(t *testing.T) {
-	dir, err := ioutil.TempDir("", "test-lmdb-persistence")
+	dir, err := os.MkdirTemp("", "test-lmdb-persistence")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
@@ -103,13 +104,14 @@ func TestCachePersistence(t *testing.T) {
 	key := Key(q)
 	msg := createTestMsg("persistent.com.", 60, "5.6.7.8")
 
+	m := metrics.NewMetrics()
 	// Create the first cache, add an item, and close it to persist the data.
-	c1 := NewCache(128, 1, 0, dir)
+	c1 := NewCache(128, 1, 0, dir, m)
 	c1.Set(key, msg, 0, 0)
 	c1.Close()
 
 	// Create a new cache from the same DB path to load the data.
-	c2 := NewCache(128, 1, 0, dir)
+	c2 := NewCache(128, 1, 0, dir, m)
 	defer c2.Close()
 
 	// Verify the item is present in the new cache.
@@ -126,7 +128,7 @@ func TestCachePersistence(t *testing.T) {
 }
 
 func TestCachePersistenceExpiration(t *testing.T) {
-	dir, err := ioutil.TempDir("", "test-lmdb-persistence-expired")
+	dir, err := os.MkdirTemp("", "test-lmdb-persistence-expired")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
@@ -136,8 +138,9 @@ func TestCachePersistenceExpiration(t *testing.T) {
 	key := Key(q)
 	msg := createTestMsg("expired-persistent.com.", 1, "9.8.7.6") // 1-second TTL
 
+	m := metrics.NewMetrics()
 	// Create the first cache, add an item, and close it.
-	c1 := NewCache(128, 1, 0, dir)
+	c1 := NewCache(128, 1, 0, dir, m)
 	c1.Set(key, msg, 0, 0)
 	c1.Close()
 
@@ -145,7 +148,7 @@ func TestCachePersistenceExpiration(t *testing.T) {
 	time.Sleep(1100 * time.Millisecond)
 
 	// Create a new cache from the same DB path.
-	c2 := NewCache(128, 1, 0, dir)
+	c2 := NewCache(128, 1, 0, dir, m)
 	defer c2.Close()
 
 	// The expired item should not be loaded.

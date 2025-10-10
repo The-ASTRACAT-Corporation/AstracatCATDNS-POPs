@@ -68,6 +68,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, error) 
 		cachedMsg.Id = req.Id
 
 		if revalidate {
+			r.metrics.IncrementCacheRevalidations()
 			// Trigger a background revalidation using the worker pool
 			go func() {
 				if err := r.workerPool.Acquire(context.Background()); err != nil {
@@ -135,6 +136,7 @@ func (r *Resolver) exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, error)
 	r.metrics.RecordLatency(q.Name, latency)
 
 	if err != nil {
+		r.metrics.IncrementUnboundErrors()
 		log.Printf("Unbound resolution error for %s: %v", q.Name, err)
 		// When an error occurs, unbound does not return a message.
 		// We'll construct a SERVFAIL to send back to the client.
@@ -160,15 +162,18 @@ func (r *Resolver) exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, error)
 	}
 
 	if result.Bogus {
+		r.metrics.RecordDNSSECValidation("bogus")
 		log.Printf("DNSSEC validation for %s resulted in BOGUS.", q.Name)
 		// The test expects an error for bogus domains. We'll return a SERVFAIL
 		// message that the calling handler can use, along with an error.
 		msg.Rcode = dns.RcodeServerFailure
 		return msg, errors.New("BOGUS: DNSSEC validation failed")
 	} else if result.Secure {
+		r.metrics.RecordDNSSECValidation("secure")
 		log.Printf("DNSSEC validation for %s resulted in SECURE.", q.Name)
 		msg.AuthenticatedData = true
 	} else {
+		r.metrics.RecordDNSSECValidation("insecure")
 		log.Printf("DNSSEC validation for %s resulted in INSECURE.", q.Name)
 		msg.AuthenticatedData = false
 	}
