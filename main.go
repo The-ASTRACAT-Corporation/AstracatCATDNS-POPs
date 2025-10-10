@@ -2,16 +2,25 @@ package main
 
 import (
 	"log"
+	"net/http"
 	"os"
 	"time"
 
 	"dns-resolver/internal/cache"
 	"dns-resolver/internal/config"
-	"dns-resolver/internal/dashboard"
 	"dns-resolver/internal/metrics"
 	"dns-resolver/internal/resolver"
 	"dns-resolver/internal/server"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+func startMetricsServer(addr string) {
+	http.Handle("/metrics", promhttp.Handler())
+	log.Printf("Metrics server starting on %s", addr)
+	if err := http.ListenAndServe(addr, nil); err != nil {
+		log.Fatalf("Failed to start metrics server: %v", err)
+	}
+}
 
 func main() {
 	// Open a file for logging. Truncate the file if it already exists.
@@ -50,12 +59,11 @@ func main() {
 		}
 	}()
 
+	// Start the metrics server
+	go startMetricsServer(cfg.MetricsAddr)
+
 	// Create and start the server
 	srv := server.NewServer(cfg, m, res)
-
-	// Start the dashboard server
-	dash := dashboard.NewServer(cfg.DashboardAddr, m)
-	go dash.Start()
 
 	srv.ListenAndServe()
 }

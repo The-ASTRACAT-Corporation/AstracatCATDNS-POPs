@@ -5,7 +5,7 @@ import "time"
 // Config holds the configuration for the DNS resolver.
 type Config struct {
 	ListenAddr           string
-	DashboardAddr        string
+	MetricsAddr          string
 	UpstreamTimeout      time.Duration
 	RequestTimeout       time.Duration
 	MaxWorkers           int
@@ -23,7 +23,7 @@ type Config struct {
 func NewConfig() *Config {
 	return &Config{
 		ListenAddr:           "0.0.0.0:5053",
-		DashboardAddr:        "0.0.0.0:8080",
+		MetricsAddr:          "0.0.0.0:9090",
 		UpstreamTimeout:      5 * time.Second,
 		RequestTimeout:       5 * time.Second,
 		MaxWorkers:           100,
