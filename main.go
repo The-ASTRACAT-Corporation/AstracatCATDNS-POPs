@@ -2,7 +2,6 @@ package main
 
 import (
 	"log"
-	"net/http"
 	"os"
 	"time"
 
@@ -11,7 +10,6 @@ import (
 	"dns-resolver/internal/metrics"
 	"dns-resolver/internal/resolver"
 	"dns-resolver/internal/server"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Старая функция больше не используется, так как теперь используем метод из пакета metrics
