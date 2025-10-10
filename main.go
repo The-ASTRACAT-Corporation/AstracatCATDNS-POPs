@@ -42,7 +42,7 @@ func main() {
 	m := metrics.NewMetrics()
 
 	// Create cache and resolver
-	c := cache.NewCache(cfg.CacheSize, cache.DefaultShards, cfg.PrefetchInterval, cfg.LMDBPath)
+	c := cache.NewCache(cfg.CacheSize, cache.DefaultShards, cfg.PrefetchInterval, cfg.LMDBPath, m)
 	defer c.Close()
 	res := resolver.NewResolver(cfg, c, m)
 

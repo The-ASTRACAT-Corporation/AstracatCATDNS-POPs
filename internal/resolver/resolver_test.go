@@ -20,9 +20,9 @@ func TestResolver_Resolve(t *testing.T) {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(dir)
-	c := cache.NewCache(cache.DefaultCacheSize, cache.DefaultShards, cfg.PrefetchInterval, dir)
-	defer c.Close()
 	m := metrics.NewMetrics()
+	c := cache.NewCache(cache.DefaultCacheSize, cache.DefaultShards, cfg.PrefetchInterval, dir, m)
+	defer c.Close()
 	r := NewResolver(cfg, c, m)
 
 	// Define the question to test.
@@ -71,9 +71,9 @@ func TestResolver_Resolve_DNSSEC(t *testing.T) {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(dir)
-	c := cache.NewCache(cache.DefaultCacheSize, cache.DefaultShards, cfg.PrefetchInterval, dir)
-	defer c.Close()
 	m := metrics.NewMetrics()
+	c := cache.NewCache(cache.DefaultCacheSize, cache.DefaultShards, cfg.PrefetchInterval, dir, m)
+	defer c.Close()
 	r := NewResolver(cfg, c, m)
 
 	testCases := []struct {

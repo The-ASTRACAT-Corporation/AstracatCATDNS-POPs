@@ -86,6 +86,42 @@ var (
 		Name: "dns_resolver_response_codes_total",
 		Help: "Total number of responses by code",
 	}, []string{"code"})
+	promUnboundErrors = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dns_resolver_unbound_errors_total",
+		Help: "Total number of errors from the Unbound resolver",
+	})
+	promDNSSECValidation = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "dns_resolver_dnssec_validation_total",
+		Help: "Total number of DNSSEC validation results by type",
+	}, []string{"result"})
+	promCacheRevalidations = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dns_resolver_cache_revalidations_total",
+		Help: "Total number of cache revalidations",
+	})
+	promCacheHits = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dns_resolver_cache_hits_total",
+		Help: "Total number of cache hits",
+	})
+	promCacheMisses = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dns_resolver_cache_misses_total",
+		Help: "Total number of cache misses",
+	})
+	promCacheEvictions = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dns_resolver_cache_evictions_total",
+		Help: "Total number of cache evictions",
+	})
+	promLMDBCacheLoads = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dns_resolver_lmdb_loads_total",
+		Help: "Total number of items loaded from LMDB",
+	})
+	promLMDBErrors = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dns_resolver_lmdb_errors_total",
+		Help: "Total number of LMDB errors",
+	})
+	promPrefetches = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dns_resolver_prefetches_total",
+		Help: "Total number of cache prefetches",
+	})
 )
 
 // NewMetrics returns the singleton instance of Metrics.
@@ -266,4 +302,49 @@ func (m *Metrics) RecordQueryType(qtype string) {
 // RecordResponseCode records the response code of a DNS query.
 func (m *Metrics) RecordResponseCode(rcode string) {
 	promResponseCodes.WithLabelValues(rcode).Inc()
+}
+
+// IncrementUnboundErrors increments the Unbound error counter.
+func (m *Metrics) IncrementUnboundErrors() {
+	promUnboundErrors.Inc()
+}
+
+// RecordDNSSECValidation records a DNSSEC validation result.
+func (m *Metrics) RecordDNSSECValidation(result string) {
+	promDNSSECValidation.WithLabelValues(result).Inc()
+}
+
+// IncrementCacheRevalidations increments the cache revalidation counter.
+func (m *Metrics) IncrementCacheRevalidations() {
+	promCacheRevalidations.Inc()
+}
+
+// IncrementCacheHits increments the cache hit counter.
+func (m *Metrics) IncrementCacheHits() {
+	promCacheHits.Inc()
+}
+
+// IncrementCacheMisses increments the cache miss counter.
+func (m *Metrics) IncrementCacheMisses() {
+	promCacheMisses.Inc()
+}
+
+// IncrementCacheEvictions increments the cache eviction counter.
+func (m *Metrics) IncrementCacheEvictions() {
+	promCacheEvictions.Inc()
+}
+
+// IncrementLMDBCacheLoads increments the LMDB cache load counter.
+func (m *Metrics) IncrementLMDBCacheLoads() {
+	promLMDBCacheLoads.Inc()
+}
+
+// IncrementLMDBErrors increments the LMDB error counter.
+func (m *Metrics) IncrementLMDBErrors() {
+	promLMDBErrors.Inc()
+}
+
+// IncrementPrefetches increments the prefetch counter.
+func (m *Metrics) IncrementPrefetches() {
+	promPrefetches.Inc()
 }

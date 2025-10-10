@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"container/list"
 	"context"
+	"dns-resolver/internal/metrics"
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -137,10 +138,11 @@ type Cache struct {
 	resolver         interfaces.CacheResolver
 	lmdbEnv          *lmdb.Env
 	lmdbDBI          lmdb.DBI
+	metrics          *metrics.Metrics
 }
 
 // NewCache creates and returns a new Cache with LMDB persistence.
-func NewCache(size int, numShards int, prefetchInterval time.Duration, lmdbPath string) *Cache {
+func NewCache(size int, numShards int, prefetchInterval time.Duration, lmdbPath string, m *metrics.Metrics) *Cache {
 	if size <= 0 {
 		size = DefaultCacheSize
 	}
@@ -203,6 +205,7 @@ func NewCache(size int, numShards int, prefetchInterval time.Duration, lmdbPath 
 		stopPrefetch:     make(chan struct{}),
 		lmdbEnv:          env,
 		lmdbDBI:          dbi,
+		metrics:          m,
 	}
 
 	c.loadFromDB()
@@ -232,11 +235,13 @@ func (c *Cache) loadFromDB() {
 				return nil
 			}
 			if err != nil {
+				c.metrics.IncrementLMDBErrors()
 				return err
 			}
 
 			var fItem FixedSizeCacheItem
 			if err := fItem.Unpack(val); err != nil {
+				c.metrics.IncrementLMDBErrors()
 				log.Printf("Failed to unpack cache item for key %s: %v", string(key), err)
 				continue
 			}
@@ -248,15 +253,18 @@ func (c *Cache) loadFromDB() {
 
 			msg := new(dns.Msg)
 			if err := msg.Unpack(fItem.MsgBytes); err != nil {
+				c.metrics.IncrementLMDBErrors()
 				log.Printf("Failed to unpack DNS message for key %s: %v", string(key), err)
 				continue
 			}
 
+			c.metrics.IncrementLMDBCacheLoads()
 			evictedKey := c.setInMemory(string(key), fItem.MsgBytes, msg.Question[0],
 				time.Duration(fItem.StaleWhileRevalidateNanoseconds),
 				time.Duration(fItem.PrefetchNanoseconds),
 				expiration)
 			if evictedKey != "" {
+				c.metrics.IncrementCacheEvictions()
 				c.deleteFromDB(evictedKey)
 			}
 		}
@@ -292,6 +300,7 @@ func (c *Cache) writeToDB(key string, msg *dns.Msg, expiration time.Time, swr, p
 		return txn.Put(c.lmdbDBI, []byte(key), packedData, 0)
 	})
 	if err != nil {
+		c.metrics.IncrementLMDBErrors()
 		log.Printf("Failed to write to LMDB for key %s: %v", key, err)
 	}
 }
@@ -301,6 +310,7 @@ func (c *Cache) deleteFromDB(key string) {
 		return txn.Del(c.lmdbDBI, []byte(key), nil)
 	})
 	if err != nil {
+		c.metrics.IncrementLMDBErrors()
 		log.Printf("Failed to delete from LMDB for key %s: %v", key, err)
 	}
 }
@@ -312,6 +322,7 @@ func (c *Cache) Get(key string) (*dns.Msg, bool, bool) {
 
 	item, found := shard.items[key]
 	if !found {
+		c.metrics.IncrementCacheMisses()
 		return nil, false, false
 	}
 
@@ -321,28 +332,35 @@ func (c *Cache) Get(key string) (*dns.Msg, bool, bool) {
 		// Consider removing the corrupted item
 		evictedKey := shard.removeItem(item)
 		if evictedKey != "" {
+			c.metrics.IncrementCacheEvictions()
 			c.deleteFromDB(evictedKey)
 		}
+		c.metrics.IncrementCacheMisses()
 		return nil, false, false
 	}
 
 	if time.Now().After(item.Expiration) {
 		if item.StaleWhileRevalidate > 0 && time.Now().Before(item.Expiration.Add(item.StaleWhileRevalidate)) {
+			c.metrics.IncrementCacheHits()
 			msg.Id = 0
 			return msg, true, true
 		}
 		evictedKey := shard.removeItem(item)
 		if evictedKey != "" {
+			c.metrics.IncrementCacheEvictions()
 			c.deleteFromDB(evictedKey)
 		}
+		c.metrics.IncrementCacheMisses()
 		return nil, false, false
 	}
 
 	evictedKey := shard.accessItem(item)
 	if evictedKey != "" {
+		c.metrics.IncrementCacheEvictions()
 		c.deleteFromDB(evictedKey)
 	}
 
+	c.metrics.IncrementCacheHits()
 	msg.Id = 0
 	return msg, true, false
 }
@@ -365,6 +383,7 @@ func (c *Cache) Set(key string, msg *dns.Msg, swr, prefetch time.Duration) {
 
 	evictedKey := c.setInMemory(key, packedMsg, msg.Question[0], swr, prefetch, expiration)
 	if evictedKey != "" && evictedKey != key {
+		c.metrics.IncrementCacheEvictions()
 		c.deleteFromDB(evictedKey)
 	}
 }
@@ -495,6 +514,7 @@ func (c *Cache) checkAndPrefetch() {
 }
 
 func (c *Cache) performPrefetch(key string, q dns.Question) {
+	c.metrics.IncrementPrefetches()
 	_, err, _ := c.resolver.GetSingleflightGroup().Do(key+"-prefetch", func() (interface{}, error) {
 		log.Printf("Prefetching %s", q.Name)
 		req := new(dns.Msg)
