@@ -81,3 +81,21 @@ func TestIntegration_ResolveDNSSEC(t *testing.T) {
 		t.Error("Expected Authenticated Data (AD) bit to be set for a DNSSEC-signed domain")
 	}
 }
+
+func BenchmarkResolve(b *testing.B) {
+	client := new(dns.Client)
+	msg := new(dns.Msg)
+	msg.SetQuestion("example.com.", dns.TypeA)
+	serverAddr := "127.0.0.1:5053"
+
+	b.ResetTimer()
+
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			_, _, err := client.Exchange(msg, serverAddr)
+			if err != nil {
+				b.Error(err)
+			}
+		}
+	})
+}
