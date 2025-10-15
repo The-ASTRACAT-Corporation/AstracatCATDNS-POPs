@@ -1,9 +1,11 @@
 package metrics
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
 	"runtime"
+	"sort"
 	"sync"
 	"time"
 
@@ -21,6 +23,42 @@ type LatencyStat struct {
 	Count        int64
 }
 
+// JSON-friendly structs for the dashboard
+type DomainCount struct {
+	Domain string `json:"domain"`
+	Count  int64  `json:"count"`
+}
+
+type DomainLatency struct {
+	Domain     string  `json:"domain"`
+	AvgLatency float64 `json:"avg_latency"`
+}
+
+type TypeCount struct {
+	Type  string `json:"type"`
+	Count int64  `json:"count"`
+}
+
+type CodeCount struct {
+	Code  string `json:"code"`
+	Count int64  `json:"count"`
+}
+
+type DashboardMetrics struct {
+	QPS               float64         `json:"qps"`
+	TotalQueries      int64           `json:"total_queries"`
+	CPUUsage          float64         `json:"cpu_usage"`
+	MemoryUsage       float64         `json:"memory_usage"`
+	Goroutines        int             `json:"goroutines"`
+	CacheHits         int64           `json:"cache_hits"`
+	CacheMisses       int64           `json:"cache_misses"`
+	CacheHitRate      float64         `json:"cache_hit_rate"`
+	TopNXDomains      []DomainCount   `json:"top_nx_domains"`
+	TopLatencyDomains []DomainLatency `json:"top_latency_domains"`
+	QueryTypes        []TypeCount     `json:"query_types"`
+	ResponseCodes     []CodeCount     `json:"response_codes"`
+}
+
 // Metrics holds the collected metrics.
 type Metrics struct {
 	sync.RWMutex
@@ -31,6 +69,14 @@ type Metrics struct {
 	queryTypes        sync.Map // map[string]int64
 	responseCodes     sync.Map // map[string]int64
 	registry          *prometheus.Registry
+
+	// Fields for direct access by JSON handler
+	qps            float64
+	cpuUsage       float64
+	memoryUsage    float64
+	goroutineCount int
+	cacheHits      int64
+	cacheMisses    int64
 }
 
 var (
@@ -153,18 +199,96 @@ func (m *Metrics) StartMetricsServer(addr string) {
 			EnableOpenMetrics: true,
 		},
 	))
-	
+
+	http.HandleFunc("/metrics.json", m.jsonMetricsHandler)
+	http.HandleFunc("/dashboard", m.dashboardHandler)
+
 	// Добавляем эндпоинт для проверки здоровья
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
-	
+
 	log.Printf("Metrics server starting on %s", addr)
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		log.Fatalf("Failed to start metrics server: %v", err)
 	}
 }
+
+// dashboardHandler serves the HTML dashboard page.
+func (m *Metrics) dashboardHandler(w http.ResponseWriter, r *http.Request) {
+	http.ServeFile(w, r, "internal/dashboard/index.html")
+}
+
+// jsonMetricsHandler serves metrics in JSON format for the dashboard.
+func (m *Metrics) jsonMetricsHandler(w http.ResponseWriter, r *http.Request) {
+	m.RLock()
+	defer m.RUnlock()
+
+	var topNXDomains []DomainCount
+	m.topNXDomains.Range(func(key, value interface{}) bool {
+		topNXDomains = append(topNXDomains, DomainCount{Domain: key.(string), Count: value.(int64)})
+		return true
+	})
+	sort.Slice(topNXDomains, func(i, j int) bool { return topNXDomains[i].Count > topNXDomains[j].Count })
+	if len(topNXDomains) > 10 {
+		topNXDomains = topNXDomains[:10]
+	}
+
+	var topLatencyDomains []DomainLatency
+	m.topLatencyDomains.Range(func(key, value interface{}) bool {
+		stat := value.(LatencyStat)
+		if stat.Count > 0 {
+			avgLatency := stat.TotalLatency.Seconds() * 1000 / float64(stat.Count)
+			topLatencyDomains = append(topLatencyDomains, DomainLatency{Domain: key.(string), AvgLatency: avgLatency})
+		}
+		return true
+	})
+	sort.Slice(topLatencyDomains, func(i, j int) bool { return topLatencyDomains[i].AvgLatency > topLatencyDomains[j].AvgLatency })
+	if len(topLatencyDomains) > 10 {
+		topLatencyDomains = topLatencyDomains[:10]
+	}
+
+	var queryTypes []TypeCount
+	m.queryTypes.Range(func(key, value interface{}) bool {
+		queryTypes = append(queryTypes, TypeCount{Type: key.(string), Count: value.(int64)})
+		return true
+	})
+	sort.Slice(queryTypes, func(i, j int) bool { return queryTypes[i].Count > queryTypes[j].Count })
+
+	var responseCodes []CodeCount
+	m.responseCodes.Range(func(key, value interface{}) bool {
+		responseCodes = append(responseCodes, CodeCount{Code: key.(string), Count: value.(int64)})
+		return true
+	})
+	sort.Slice(responseCodes, func(i, j int) bool { return responseCodes[i].Count > responseCodes[j].Count })
+
+	var cacheHitRate float64
+	if m.cacheHits+m.cacheMisses > 0 {
+		cacheHitRate = float64(m.cacheHits) / float64(m.cacheHits+m.cacheMisses) * 100
+	}
+
+	data := DashboardMetrics{
+		QPS:               m.qps,
+		TotalQueries:      m.totalQueries,
+		CPUUsage:          m.cpuUsage,
+		MemoryUsage:       m.memoryUsage,
+		Goroutines:        m.goroutineCount,
+		CacheHits:         m.cacheHits,
+		CacheMisses:       m.cacheMisses,
+		CacheHitRate:      cacheHitRate,
+		TopNXDomains:      topNXDomains,
+		TopLatencyDomains: topLatencyDomains,
+		QueryTypes:        queryTypes,
+		ResponseCodes:     responseCodes,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		log.Printf("Error encoding metrics to JSON: %v", err)
+	}
+}
+
 
 // IncrementQueries increments the total number of queries.
 func (m *Metrics) IncrementQueries() {
@@ -185,6 +309,7 @@ func (m *Metrics) qpsCalculator() {
 		currentQueries := m.totalQueries
 		qps := float64(currentQueries - lastQueryCount)
 		lastQueryCount = currentQueries
+		m.qps = qps
 		m.Unlock()
 		promQPS.Set(qps)
 	}
@@ -196,22 +321,28 @@ func (m *Metrics) systemMetricsCollector() {
 	defer ticker.Stop()
 
 	for range ticker.C {
+		m.Lock()
 		// CPU Usage
 		cpuPercentages, err := cpu.Percent(0, false)
 		if err == nil && len(cpuPercentages) > 0 {
+			m.cpuUsage = cpuPercentages[0]
 			promCPUUsage.Set(cpuPercentages[0])
 		}
 
 		// Memory Usage
 		memInfo, err := mem.VirtualMemory()
 		if err == nil {
+			m.memoryUsage = memInfo.UsedPercent
 			promMemoryUsage.Set(memInfo.UsedPercent)
 		}
 
 		// Goroutine Count
-		promGoroutineCount.Set(float64(runtime.NumGoroutine()))
+		m.goroutineCount = runtime.NumGoroutine()
+		promGoroutineCount.Set(float64(m.goroutineCount))
 
-		// Network Stats
+		m.Unlock()
+
+		// Network Stats - no need to lock for these, they are just for prometheus
 		netIO, err := net.IOCounters(false)
 		if err == nil && len(netIO) > 0 {
 			promNetworkSent.Set(float64(netIO[0].BytesSent))
@@ -325,11 +456,15 @@ func (m *Metrics) processTopLatencyDomains() {
 
 // RecordQueryType records the type of a DNS query.
 func (m *Metrics) RecordQueryType(qtype string) {
+	val, _ := m.queryTypes.LoadOrStore(qtype, int64(0))
+	m.queryTypes.Store(qtype, val.(int64)+1)
 	promQueryTypes.WithLabelValues(qtype).Inc()
 }
 
 // RecordResponseCode records the response code of a DNS query.
 func (m *Metrics) RecordResponseCode(rcode string) {
+	val, _ := m.responseCodes.LoadOrStore(rcode, int64(0))
+	m.responseCodes.Store(rcode, val.(int64)+1)
 	promResponseCodes.WithLabelValues(rcode).Inc()
 }
 
@@ -350,11 +485,17 @@ func (m *Metrics) IncrementCacheRevalidations() {
 
 // IncrementCacheHits increments the cache hit counter.
 func (m *Metrics) IncrementCacheHits() {
+	m.Lock()
+	m.cacheHits++
+	m.Unlock()
 	promCacheHits.Inc()
 }
 
 // IncrementCacheMisses increments the cache miss counter.
 func (m *Metrics) IncrementCacheMisses() {
+	m.Lock()
+	m.cacheMisses++
+	m.Unlock()
 	promCacheMisses.Inc()
 }
 
