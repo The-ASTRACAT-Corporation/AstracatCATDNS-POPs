@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"net"
 	"os"
 	"testing"
 	"time"
@@ -9,12 +10,63 @@ import (
 	"github.com/miekg/dns"
 )
 
-// TestMain runs the main function in a separate goroutine and then runs tests.
-// This is a simple way to write an integration test for the server.
-func TestMain(m *testing.M) {
-	// Start the server in the background
+// newTestServer starts a mock DNS server and returns its address.
+func newTestServer(t *testing.T, handler dns.HandlerFunc) string {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to listen: %v", err)
+	}
+
+	server := &dns.Server{PacketConn: pc, ReadTimeout: time.Second, WriteTimeout: time.Second}
+	server.Handler = handler
+
 	go func() {
-		// Suppress log output from the server during tests
+		err := server.ActivateAndServe()
+		if err != nil && err.Error() != "dns: Server closed" {
+			t.Logf("Mock server error: %v", err)
+		}
+	}()
+
+	t.Cleanup(func() {
+		server.Shutdown()
+	})
+
+	return pc.LocalAddr().String()
+}
+
+// TestMain sets up a mock upstream resolver and runs the main server against it.
+func TestMain(m *testing.M) {
+	// Dummy testing.T for the mock server setup
+	t := &testing.T{}
+
+	// Mock DNS server that handles all queries.
+	mockHandler := func(w dns.ResponseWriter, r *dns.Msg) {
+		msg := new(dns.Msg)
+		msg.SetReply(r)
+		q := r.Question[0]
+
+		// Simple routing based on domain for different test cases.
+		switch q.Name {
+		case "ripe.net.":
+			msg.AuthenticatedData = true // Simulate secure response
+			msg.Answer = append(msg.Answer, &dns.A{
+				Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
+				A:   net.ParseIP("193.0.6.139"),
+			})
+		default: // For cloudflare.com and example.com
+			msg.Answer = append(msg.Answer, &dns.A{
+				Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
+				A:   net.ParseIP("1.1.1.1"),
+			})
+		}
+		w.WriteMsg(msg)
+	}
+
+	mockKnotResolverAddr := newTestServer(t, mockHandler)
+	os.Setenv("KNOT_RESOLVER_ADDR", mockKnotResolverAddr)
+
+	// Start the main application server in the background
+	go func() {
 		log.SetOutput(os.NewFile(0, os.DevNull))
 		main()
 	}()
