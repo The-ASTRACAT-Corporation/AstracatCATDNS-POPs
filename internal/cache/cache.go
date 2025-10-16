@@ -3,7 +3,6 @@ package cache
 import (
 	"bytes"
 	"container/list"
-	"context"
 	"dns-resolver/internal/metrics"
 	"encoding/binary"
 	"fmt"
@@ -24,14 +23,12 @@ type persistentCacheItem struct {
 	MsgBytes             []byte
 	Expiration           time.Time
 	StaleWhileRevalidate time.Duration
-	Prefetch             time.Duration
 }
 
 // FixedSizeCacheItem represents the cache item with fixed-size metadata
 type FixedSizeCacheItem struct {
 	ExpirationUnix          int64
 	StaleWhileRevalidateNanoseconds int64
-	PrefetchNanoseconds     int64
 	MsgBytesLength          uint32
 	MsgBytes                []byte
 }
@@ -46,10 +43,6 @@ func (f *FixedSizeCacheItem) Pack() ([]byte, error) {
 		return nil, err
 	}
 	err = binary.Write(buf, binary.BigEndian, f.StaleWhileRevalidateNanoseconds)
-	if err != nil {
-		return nil, err
-	}
-	err = binary.Write(buf, binary.BigEndian, f.PrefetchNanoseconds)
 	if err != nil {
 		return nil, err
 	}
@@ -69,7 +62,7 @@ func (f *FixedSizeCacheItem) Pack() ([]byte, error) {
 
 // Unpack deserializes bytes into FixedSizeCacheItem
 func (f *FixedSizeCacheItem) Unpack(data []byte) error {
-	if len(data) < 32 { // 8*4 bytes for the fixed-size fields
+	if len(data) < 24 { // 8*3 bytes for the fixed-size fields
 		return fmt.Errorf("data too short")
 	}
 	
@@ -80,10 +73,6 @@ func (f *FixedSizeCacheItem) Unpack(data []byte) error {
 		return err
 	}
 	err = binary.Read(buf, binary.BigEndian, &f.StaleWhileRevalidateNanoseconds)
-	if err != nil {
-		return err
-	}
-	err = binary.Read(buf, binary.BigEndian, &f.PrefetchNanoseconds)
 	if err != nil {
 		return err
 	}
@@ -112,7 +101,6 @@ type CacheItem struct {
 	Question             dns.Question
 	Expiration           time.Time
 	StaleWhileRevalidate time.Duration
-	Prefetch             time.Duration
 	element              *list.Element
 	parentList           *list.List
 }
@@ -129,20 +117,18 @@ type slruSegment struct {
 
 // Cache is a thread-safe, sharded DNS cache with SLRU eviction policy and LMDB persistence.
 type Cache struct {
-	shards           []*slruSegment
-	numShards        uint32
-	probationSize    int
-	protectedSize    int
-	prefetchInterval time.Duration
-	stopPrefetch     chan struct{}
-	resolver         interfaces.CacheResolver
-	lmdbEnv          *lmdb.Env
-	lmdbDBI          lmdb.DBI
-	metrics          *metrics.Metrics
+	shards        []*slruSegment
+	numShards     uint32
+	probationSize int
+	protectedSize int
+	resolver      interfaces.CacheResolver
+	lmdbEnv       *lmdb.Env
+	lmdbDBI       lmdb.DBI
+	metrics       *metrics.Metrics
 }
 
 // NewCache creates and returns a new Cache with LMDB persistence.
-func NewCache(size int, numShards int, prefetchInterval time.Duration, lmdbPath string, m *metrics.Metrics) *Cache {
+func NewCache(size int, numShards int, lmdbPath string, m *metrics.Metrics) *Cache {
 	if size <= 0 {
 		size = DefaultCacheSize
 	}
@@ -197,15 +183,13 @@ func NewCache(size int, numShards int, prefetchInterval time.Duration, lmdbPath 
 	}
 
 	c := &Cache{
-		shards:           shards,
-		numShards:        uint32(numShards),
-		probationSize:    probationSize,
-		protectedSize:    protectedSize,
-		prefetchInterval: prefetchInterval,
-		stopPrefetch:     make(chan struct{}),
-		lmdbEnv:          env,
-		lmdbDBI:          dbi,
-		metrics:          m,
+		shards:        shards,
+		numShards:     uint32(numShards),
+		probationSize: probationSize,
+		protectedSize: protectedSize,
+		lmdbEnv:       env,
+		lmdbDBI:       dbi,
+		metrics:       m,
 	}
 
 	c.loadFromDB()
@@ -215,7 +199,6 @@ func NewCache(size int, numShards int, prefetchInterval time.Duration, lmdbPath 
 
 // Close gracefully closes the cache and its underlying LMDB environment.
 func (c *Cache) Close() {
-	close(c.stopPrefetch)
 	if c.lmdbEnv != nil {
 		c.lmdbEnv.Close()
 	}
@@ -261,7 +244,6 @@ func (c *Cache) loadFromDB() {
 			c.metrics.IncrementLMDBCacheLoads()
 			evictedKey := c.setInMemory(string(key), fItem.MsgBytes, msg.Question[0],
 				time.Duration(fItem.StaleWhileRevalidateNanoseconds),
-				time.Duration(fItem.PrefetchNanoseconds),
 				expiration)
 			if evictedKey != "" {
 				c.metrics.IncrementCacheEvictions()
@@ -275,7 +257,7 @@ func (c *Cache) loadFromDB() {
 	}
 }
 
-func (c *Cache) writeToDB(key string, msg *dns.Msg, expiration time.Time, swr, prefetch time.Duration) {
+func (c *Cache) writeToDB(key string, msg *dns.Msg, expiration time.Time, swr time.Duration) {
 	packedMsg, err := msg.Pack()
 	if err != nil {
 		log.Printf("Failed to pack DNS message for key %s: %v", key, err)
@@ -285,7 +267,6 @@ func (c *Cache) writeToDB(key string, msg *dns.Msg, expiration time.Time, swr, p
 	fItem := FixedSizeCacheItem{
 		ExpirationUnix:                  expiration.Unix(),
 		StaleWhileRevalidateNanoseconds: int64(swr),
-		PrefetchNanoseconds:             int64(prefetch),
 		MsgBytesLength:                  uint32(len(packedMsg)),
 		MsgBytes:                        packedMsg,
 	}
@@ -365,7 +346,7 @@ func (c *Cache) Get(key string) (*dns.Msg, bool, bool) {
 	return msg, true, false
 }
 
-func (c *Cache) Set(key string, msg *dns.Msg, swr, prefetch time.Duration) {
+func (c *Cache) Set(key string, msg *dns.Msg, swr time.Duration) {
 	if msg.Rcode == dns.RcodeServerFailure || msg.Rcode == dns.RcodeNameError {
 		return
 	}
@@ -373,7 +354,7 @@ func (c *Cache) Set(key string, msg *dns.Msg, swr, prefetch time.Duration) {
 	ttl := getMinTTL(msg)
 	expiration := time.Now().Add(time.Duration(ttl) * time.Second)
 
-	c.writeToDB(key, msg, expiration, swr, prefetch)
+	c.writeToDB(key, msg, expiration, swr)
 
 	packedMsg, err := msg.Pack()
 	if err != nil {
@@ -381,14 +362,14 @@ func (c *Cache) Set(key string, msg *dns.Msg, swr, prefetch time.Duration) {
 		return
 	}
 
-	evictedKey := c.setInMemory(key, packedMsg, msg.Question[0], swr, prefetch, expiration)
+	evictedKey := c.setInMemory(key, packedMsg, msg.Question[0], swr, expiration)
 	if evictedKey != "" && evictedKey != key {
 		c.metrics.IncrementCacheEvictions()
 		c.deleteFromDB(evictedKey)
 	}
 }
 
-func (c *Cache) setInMemory(key string, msgBytes []byte, question dns.Question, swr, prefetch time.Duration, expiration time.Time) string {
+func (c *Cache) setInMemory(key string, msgBytes []byte, question dns.Question, swr time.Duration, expiration time.Time) string {
 	shard := c.getShard(key)
 	shard.Lock()
 	defer shard.Unlock()
@@ -398,7 +379,6 @@ func (c *Cache) setInMemory(key string, msgBytes []byte, question dns.Question, 
 		existingItem.Question = question
 		existingItem.Expiration = expiration
 		existingItem.StaleWhileRevalidate = swr
-		existingItem.Prefetch = prefetch
 		if existingItem.element != nil {
 			if existingItem.parentList == shard.probationList {
 				shard.probationList.Remove(existingItem.element)
@@ -415,7 +395,6 @@ func (c *Cache) setInMemory(key string, msgBytes []byte, question dns.Question, 
 		Question:             question,
 		Expiration:           expiration,
 		StaleWhileRevalidate: swr,
-		Prefetch:             prefetch,
 	}
 	return shard.addProbation(key, item)
 }
@@ -484,59 +463,6 @@ func (s *slruSegment) removeItem(item *CacheItem) string {
 
 func (c *Cache) SetResolver(r interfaces.CacheResolver) {
 	c.resolver = r
-	go c.runPrefetcher()
-}
-
-func (c *Cache) runPrefetcher() {
-	ticker := time.NewTicker(c.prefetchInterval / 2)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			c.checkAndPrefetch()
-		case <-c.stopPrefetch:
-			return
-		}
-	}
-}
-
-func (c *Cache) checkAndPrefetch() {
-	for _, shard := range c.shards {
-		shard.RLock()
-		for key, item := range shard.items {
-			if item.Prefetch > 0 && time.Now().Add(item.Prefetch).After(item.Expiration) {
-				go c.performPrefetch(key, item.Question)
-			}
-		}
-		shard.RUnlock()
-	}
-}
-
-func (c *Cache) performPrefetch(key string, q dns.Question) {
-	c.metrics.IncrementPrefetches()
-	_, err, _ := c.resolver.GetSingleflightGroup().Do(key+"-prefetch", func() (interface{}, error) {
-		log.Printf("Prefetching %s", q.Name)
-		req := new(dns.Msg)
-		req.SetQuestion(q.Name, q.Qtype)
-		req.RecursionDesired = true
-
-		ctx, cancel := context.WithTimeout(context.Background(), c.resolver.GetConfig().UpstreamTimeout)
-		defer cancel()
-
-		resp, err := c.resolver.LookupWithoutCache(ctx, req)
-		if err != nil {
-			log.Printf("Prefetch failed for %s: %v", q.Name, err)
-			return nil, err
-		}
-
-		c.Set(key, resp, c.resolver.GetConfig().StaleWhileRevalidate, c.resolver.GetConfig().PrefetchInterval)
-		return resp, nil
-	})
-
-	if err != nil {
-		log.Printf("Prefetch singleflight error for %s: %v", q.Name, err)
-	}
 }
 
 func Key(q dns.Question) string {

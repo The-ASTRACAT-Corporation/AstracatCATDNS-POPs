@@ -19,7 +19,7 @@ func newTestCache(t *testing.T) (*Cache, func()) {
 	}
 
 	m := metrics.NewMetrics()
-	cache := NewCache(128, 1, 0, dir, m)
+	cache := NewCache(128, 1, dir, m)
 
 	cleanup := func() {
 		cache.Close()
@@ -48,7 +48,7 @@ func TestCacheSetAndGet(t *testing.T) {
 	key := Key(q)
 	msg := createTestMsg("example.com.", 60, "1.2.3.4")
 
-	c.Set(key, msg, 0, 0)
+	c.Set(key, msg, 0)
 
 	retrievedMsg, found, revalidate := c.Get(key)
 	if !found {
@@ -83,7 +83,7 @@ func TestCacheExpiration(t *testing.T) {
 	key := Key(q)
 	msg := createTestMsg("shortlived.com.", 1, "2.3.4.5")
 
-	c.Set(key, msg, 0, 0)
+	c.Set(key, msg, 0)
 
 	time.Sleep(1100 * time.Millisecond)
 
@@ -106,12 +106,12 @@ func TestCachePersistence(t *testing.T) {
 
 	m := metrics.NewMetrics()
 	// Create the first cache, add an item, and close it to persist the data.
-	c1 := NewCache(128, 1, 0, dir, m)
-	c1.Set(key, msg, 0, 0)
+	c1 := NewCache(128, 1, dir, m)
+	c1.Set(key, msg, 0)
 	c1.Close()
 
 	// Create a new cache from the same DB path to load the data.
-	c2 := NewCache(128, 1, 0, dir, m)
+	c2 := NewCache(128, 1, dir, m)
 	defer c2.Close()
 
 	// Verify the item is present in the new cache.
@@ -140,15 +140,15 @@ func TestCachePersistenceExpiration(t *testing.T) {
 
 	m := metrics.NewMetrics()
 	// Create the first cache, add an item, and close it.
-	c1 := NewCache(128, 1, 0, dir, m)
-	c1.Set(key, msg, 0, 0)
+	c1 := NewCache(128, 1, dir, m)
+	c1.Set(key, msg, 0)
 	c1.Close()
 
 	// Wait for the item to expire.
 	time.Sleep(1100 * time.Millisecond)
 
 	// Create a new cache from the same DB path.
-	c2 := NewCache(128, 1, 0, dir, m)
+	c2 := NewCache(128, 1, dir, m)
 	defer c2.Close()
 
 	// The expired item should not be loaded.
@@ -168,7 +168,7 @@ func TestCacheStaleWhileRevalidate(t *testing.T) {
 	msg := createTestMsg("stale.com.", 1, "3.4.5.6")
 	swrDuration := 5 * time.Second
 
-	c.Set(key, msg, swrDuration, 0)
+	c.Set(key, msg, swrDuration)
 
 	// Wait for item to become stale but not fully expired from SWR window
 	time.Sleep(1100 * time.Millisecond)
