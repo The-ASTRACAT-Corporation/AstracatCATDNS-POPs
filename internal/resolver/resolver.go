@@ -25,8 +25,8 @@ type Resolver struct {
 	metrics    *metrics.Metrics
 }
 
-// NewResolver creates a new resolver instance.
-func NewResolver(cfg *config.Config, c *cache.Cache, m *metrics.Metrics) *Resolver {
+// NewUnboundResolver creates a new Unbound resolver instance.
+func NewUnboundResolver(cfg *config.Config, c *cache.Cache, m *metrics.Metrics) *Resolver {
 	u := unbound.New()
 	// It's recommended to configure a trust anchor for DNSSEC validation.
 	// This could be from a file, or you can use the built-in one.
@@ -185,4 +185,9 @@ func (r *Resolver) exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, error)
 // LookupWithoutCache performs a recursive DNS lookup for a given request, bypassing the cache.
 func (r *Resolver) LookupWithoutCache(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 	return r.exchange(ctx, req)
+}
+
+// Close closes the resolver and frees resources.
+func (r *Resolver) Close() {
+	// Unbound doesn't need explicit cleanup in this implementation
 }

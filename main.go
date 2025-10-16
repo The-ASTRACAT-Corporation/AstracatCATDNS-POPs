@@ -36,7 +36,13 @@ func main() {
 	// Create cache and resolver
 	c := cache.NewCache(cfg.CacheSize, cache.DefaultShards, cfg.LMDBPath, m)
 	defer c.Close()
-	res := resolver.NewResolver(cfg, c, m)
+	
+	// Create resolver based on configuration
+	res, err := resolver.NewResolver(resolver.ResolverType(cfg.ResolverType), cfg, c, m)
+	if err != nil {
+		log.Fatalf("Failed to create resolver: %v", err)
+	}
+	defer res.Close()
 
 	// Start a goroutine to periodically update cache stats
 	go func() {
