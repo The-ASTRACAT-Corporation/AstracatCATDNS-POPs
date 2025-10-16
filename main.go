@@ -34,12 +34,9 @@ func main() {
 	m := metrics.NewMetrics()
 
 	// Create cache and resolver
-	c := cache.NewCache(cfg.CacheSize, cache.DefaultShards, cfg.PrefetchInterval, cfg.LMDBPath, m)
+	c := cache.NewCache(cfg.CacheSize, cache.DefaultShards, cfg.LMDBPath, m)
 	defer c.Close()
 	res := resolver.NewResolver(cfg, c, m)
-
-	// Set the resolver in the cache for prefetching
-	c.SetResolver(res)
 
 	// Start a goroutine to periodically update cache stats
 	go func() {

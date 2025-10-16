@@ -43,7 +43,6 @@ func NewResolver(cfg *config.Config, c *cache.Cache, m *metrics.Metrics) *Resolv
 		workerPool: NewWorkerPool(cfg.MaxWorkers),
 		metrics:    m,
 	}
-	c.SetResolver(r)
 	return r
 }
 
@@ -97,7 +96,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, error) 
 				}
 
 				if msg, ok := res.(*dns.Msg); ok {
-					r.cache.Set(key, msg, r.config.StaleWhileRevalidate, r.config.PrefetchInterval)
+					r.cache.Set(key, msg, r.config.StaleWhileRevalidate)
 					log.Printf("Successfully revalidated and updated cache for %s", q.Name)
 				}
 			}()
@@ -118,7 +117,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, error) 
 	msg.Id = req.Id
 
 	// Cache the response
-	r.cache.Set(key, msg, r.config.StaleWhileRevalidate, r.config.PrefetchInterval)
+	r.cache.Set(key, msg, r.config.StaleWhileRevalidate)
 
 	return msg, nil
 }

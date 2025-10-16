@@ -21,7 +21,7 @@ func TestResolver_Resolve(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 	m := metrics.NewMetrics()
-	c := cache.NewCache(cache.DefaultCacheSize, cache.DefaultShards, cfg.PrefetchInterval, dir, m)
+	c := cache.NewCache(cache.DefaultCacheSize, cache.DefaultShards, dir, m)
 	defer c.Close()
 	r := NewResolver(cfg, c, m)
 
@@ -72,7 +72,7 @@ func TestResolver_Resolve_DNSSEC(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 	m := metrics.NewMetrics()
-	c := cache.NewCache(cache.DefaultCacheSize, cache.DefaultShards, cfg.PrefetchInterval, dir, m)
+	c := cache.NewCache(cache.DefaultCacheSize, cache.DefaultShards, dir, m)
 	defer c.Close()
 	r := NewResolver(cfg, c, m)
 

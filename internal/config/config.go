@@ -17,7 +17,6 @@ type Config struct {
 	CacheMaxTTL          time.Duration
 	CacheMinTTL          time.Duration
 	StaleWhileRevalidate time.Duration
-	PrefetchInterval     time.Duration
 	LMDBPath             string
 }
 
@@ -37,7 +36,6 @@ func NewConfig() *Config {
 		CacheMaxTTL:          3600 * time.Second,
 		CacheMinTTL:          60 * time.Second,
 		StaleWhileRevalidate: 1 * time.Minute,
-		PrefetchInterval:     30 * time.Second,
 		LMDBPath:             "/tmp/dns_cache.lmdb",
 	}
 }
