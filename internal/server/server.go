@@ -23,11 +23,11 @@ type Server struct {
 	config   *config.Config
 	handler  dns.Handler
 	metrics  *metrics.Metrics
-	resolver *resolver.Resolver
+	resolver resolver.ResolverInterface
 }
 
 // NewServer creates a new server.
-func NewServer(cfg *config.Config, m *metrics.Metrics, res *resolver.Resolver) *Server {
+func NewServer(cfg *config.Config, m *metrics.Metrics, res resolver.ResolverInterface) *Server {
 	s := &Server{
 		config:   cfg,
 		metrics:  m,

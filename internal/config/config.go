@@ -18,6 +18,7 @@ type Config struct {
 	CacheMinTTL          time.Duration
 	StaleWhileRevalidate time.Duration
 	LMDBPath             string
+	ResolverType         string // "unbound" or "knot"
 }
 
 // NewConfig returns a new Config with default values.
@@ -37,5 +38,6 @@ func NewConfig() *Config {
 		CacheMinTTL:          60 * time.Second,
 		StaleWhileRevalidate: 1 * time.Minute,
 		LMDBPath:             "/tmp/dns_cache.lmdb",
+		ResolverType:         "knot", // Default to Knot resolver
 	}
 }
