@@ -11,6 +11,7 @@ import (
 	"dns-resolver/internal/metrics"
 
 	"github.com/miekg/dns"
+	"github.com/miekg/unbound"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -19,18 +20,26 @@ type Resolver struct {
 	config     *config.Config
 	cache      *cache.Cache
 	sf         singleflight.Group
-	dnsClient  *dns.Client
+	unbound    *unbound.Unbound
 	workerPool *WorkerPool
 	metrics    *metrics.Metrics
 }
 
 // NewResolver creates a new resolver instance.
 func NewResolver(cfg *config.Config, c *cache.Cache, m *metrics.Metrics) *Resolver {
+	u := unbound.New()
+	// It's recommended to configure a trust anchor for DNSSEC validation.
+	// This could be from a file, or you can use the built-in one.
+	// For simplicity, we'll try to load a standard root key file.
+	if err := u.AddTaFile("/etc/unbound/root.key"); err != nil {
+		log.Printf("Warning: could not load root trust anchor: %v. DNSSEC validation might not be secure.", err)
+	}
+
 	r := &Resolver{
 		config:     cfg,
 		cache:      c,
 		sf:         singleflight.Group{},
-		dnsClient:  &dns.Client{Timeout: cfg.UpstreamTimeout},
+		unbound:    u,
 		workerPool: NewWorkerPool(cfg.MaxWorkers),
 		metrics:    m,
 	}
@@ -114,45 +123,63 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, error) 
 	return msg, nil
 }
 
-// exchange sends a DNS query to the upstream resolver (Knot Resolver).
+// exchange is a wrapper around the unbound resolver's Resolve method.
 func (r *Resolver) exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 	q := req.Question[0]
 	startTime := time.Now()
 
-	msg, _, err := r.dnsClient.ExchangeContext(ctx, req, r.config.KnotResolverAddr)
+	// Note: The Go wrapper for libunbound doesn't seem to support passing context for cancellation.
+	result, err := r.unbound.Resolve(q.Name, q.Qtype, q.Qclass)
 	latency := time.Since(startTime)
 
 	// Always record latency
 	r.metrics.RecordLatency(q.Name, latency)
 
 	if err != nil {
-		r.metrics.IncrementUnboundErrors() // Rename this metric later
-		log.Printf("Upstream exchange error for %s: %v", q.Name, err)
-		// Create a SERVFAIL response on error.
-		failMsg := new(dns.Msg)
-		failMsg.SetRcode(req, dns.RcodeServerFailure)
-		return failMsg, err
+		r.metrics.IncrementUnboundErrors()
+		log.Printf("Unbound resolution error for %s: %v", q.Name, err)
+		// When an error occurs, unbound does not return a message.
+		// We'll construct a SERVFAIL to send back to the client.
+		msg := new(dns.Msg)
+		msg.SetRcode(req, dns.RcodeServerFailure)
+		return msg, err
 	}
 
-	if msg.Rcode == dns.RcodeNameError {
+	// Create a new response message from the result.
+	// We need to manually construct the dns.Msg.
+	msg := new(dns.Msg)
+	msg.SetReply(req)
+	msg.Rcode = result.Rcode
+
+	if result.Rcode == dns.RcodeNameError {
 		r.metrics.RecordNXDOMAIN(q.Name)
 	}
 
-	// Check for SERVFAIL, which can indicate a BOGUS response from a validating resolver.
-	if msg.Rcode == dns.RcodeServerFailure {
-		r.metrics.RecordDNSSECValidation("bogus")
-		log.Printf("DNSSEC validation for %s resulted in BOGUS (SERVFAIL).", q.Name)
-		return msg, errors.New("BOGUS: upstream resolver returned SERVFAIL")
+	// The unbound result gives us a flat list of RRs. We will add them
+	// to the Answer section.
+	if result.HaveData {
+		msg.Answer = result.Rr
 	}
 
-	if msg.AuthenticatedData {
+	if result.Bogus {
+		r.metrics.RecordDNSSECValidation("bogus")
+		log.Printf("DNSSEC validation for %s resulted in BOGUS.", q.Name)
+		// The test expects an error for bogus domains. We'll return a SERVFAIL
+		// message that the calling handler can use, along with an error.
+		msg.Rcode = dns.RcodeServerFailure
+		return msg, errors.New("BOGUS: DNSSEC validation failed")
+	} else if result.Secure {
 		r.metrics.RecordDNSSECValidation("secure")
 		log.Printf("DNSSEC validation for %s resulted in SECURE.", q.Name)
+		msg.AuthenticatedData = true
 	} else {
 		r.metrics.RecordDNSSECValidation("insecure")
 		log.Printf("DNSSEC validation for %s resulted in INSECURE.", q.Name)
+		msg.AuthenticatedData = false
 	}
 
+	// Unlike the previous library, unbound doesn't return a fully-formed dns.Msg.
+	// We've constructed it from the pieces in the result.
 	return msg, nil
 }
 
