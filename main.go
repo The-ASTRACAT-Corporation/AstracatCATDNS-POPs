@@ -12,6 +12,7 @@ import (
 	"dns-resolver/internal/resolver"
 	"dns-resolver/internal/server"
 	"dns-resolver/plugins/example_logger"
+	"dns-resolver/plugins/query_coalescer"
 )
 
 // Старая функция больше не используется, так как теперь используем метод из пакета metrics
@@ -65,6 +66,10 @@ func main() {
 	// Register the example logger plugin
 	loggerPlugin := example_logger.New()
 	pm.Register(loggerPlugin)
+
+	// Register the query coalescer plugin
+	coalescerPlugin := query_coalescer.New()
+	pm.Register(coalescerPlugin)
 
 	// Create and start the server
 	srv := server.NewServer(cfg, m, res, pm)
