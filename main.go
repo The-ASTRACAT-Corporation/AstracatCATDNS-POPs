@@ -8,8 +8,10 @@ import (
 	"dns-resolver/internal/cache"
 	"dns-resolver/internal/config"
 	"dns-resolver/internal/metrics"
+	"dns-resolver/internal/plugins"
 	"dns-resolver/internal/resolver"
 	"dns-resolver/internal/server"
+	"dns-resolver/plugins/example_logger"
 )
 
 // Старая функция больше не используется, так как теперь используем метод из пакета metrics
@@ -57,8 +59,15 @@ func main() {
 	// Start the metrics server
 	go m.StartMetricsServer(cfg.MetricsAddr)
 
+	// Initialize plugin manager
+	pm := plugins.NewPluginManager()
+
+	// Register the example logger plugin
+	loggerPlugin := example_logger.New()
+	pm.Register(loggerPlugin)
+
 	// Create and start the server
-	srv := server.NewServer(cfg, m, res)
+	srv := server.NewServer(cfg, m, res, pm)
 
 	srv.ListenAndServe()
 }

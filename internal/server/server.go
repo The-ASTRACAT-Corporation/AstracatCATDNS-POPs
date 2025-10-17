@@ -5,9 +5,9 @@ import (
 	"log"
 	"sync"
 
-
 	"dns-resolver/internal/config"
 	"dns-resolver/internal/metrics"
+	"dns-resolver/internal/plugins"
 	"dns-resolver/internal/resolver"
 	"github.com/miekg/dns"
 )
@@ -17,21 +17,22 @@ var msgPool = sync.Pool{
 		return new(dns.Msg)
 	},
 }
-
 // Server holds the server state.
 type Server struct {
-	config   *config.Config
-	handler  dns.Handler
-	metrics  *metrics.Metrics
-	resolver resolver.ResolverInterface
+	config        *config.Config
+	handler       dns.Handler
+	metrics       *metrics.Metrics
+	resolver      resolver.ResolverInterface
+	pluginManager *plugins.PluginManager
 }
 
 // NewServer creates a new server.
-func NewServer(cfg *config.Config, m *metrics.Metrics, res resolver.ResolverInterface) *Server {
+func NewServer(cfg *config.Config, m *metrics.Metrics, res resolver.ResolverInterface, pm *plugins.PluginManager) *Server {
 	s := &Server{
-		config:   cfg,
-		metrics:  m,
-		resolver: res,
+		config:        cfg,
+		metrics:       m,
+		resolver:      res,
+		pluginManager: pm,
 	}
 	s.buildAndSetHandler()
 	return s
@@ -42,6 +43,10 @@ func (s *Server) buildAndSetHandler() {
 		if len(r.Question) > 0 {
 			s.metrics.RecordQueryType(dns.TypeToString[r.Question[0].Qtype])
 		}
+
+		// Execute request plugins
+		pluginCtx := &plugins.PluginContext{}
+		s.pluginManager.ExecutePlugins(pluginCtx, r)
 
 		req := msgPool.Get().(*dns.Msg)
 		defer func() {
