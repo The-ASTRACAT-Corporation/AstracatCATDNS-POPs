@@ -8,8 +8,27 @@ import (
 
 // PluginContext holds context for a plugin's execution.
 type PluginContext struct {
-	// You can add more context fields here if needed,
-	// for example, the original dns.ResponseWriter.
+	ResponseWriter dns.ResponseWriter
+	RequestHandled bool
+	data           map[string]interface{}
+}
+
+// NewPluginContext creates a new PluginContext.
+func NewPluginContext() *PluginContext {
+	return &PluginContext{
+		data: make(map[string]interface{}),
+	}
+}
+
+// Set stores a value in the context.
+func (c *PluginContext) Set(key string, value interface{}) {
+	c.data[key] = value
+}
+
+// Get retrieves a value from the context.
+func (c *PluginContext) Get(key string) (interface{}, bool) {
+	val, ok := c.data[key]
+	return val, ok
 }
 
 // Plugin is the interface that all plugins must implement.
@@ -41,6 +60,23 @@ func (pm *PluginManager) ExecutePlugins(ctx *PluginContext, msg *dns.Msg) {
 	for _, p := range pm.plugins {
 		if err := p.Execute(ctx, msg); err != nil {
 			log.Printf("Error executing plugin %s: %v", p.Name(), err)
+		}
+		if ctx.RequestHandled {
+			return
+		}
+	}
+}
+
+// ResponsePlugin is an interface for plugins that want to handle responses.
+type ResponsePlugin interface {
+	Response(key string, response *dns.Msg, err error)
+}
+
+// ExecuteResponsePlugins runs plugins that implement the ResponsePlugin interface.
+func (pm *PluginManager) ExecuteResponsePlugins(key string, response *dns.Msg, err error) {
+	for _, p := range pm.plugins {
+		if rp, ok := p.(ResponsePlugin); ok {
+			rp.Response(key, response, err)
 		}
 	}
 }

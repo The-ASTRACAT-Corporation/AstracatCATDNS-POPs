@@ -45,8 +45,13 @@ func (s *Server) buildAndSetHandler() {
 		}
 
 		// Execute request plugins
-		pluginCtx := &plugins.PluginContext{}
+		pluginCtx := plugins.NewPluginContext()
+		pluginCtx.ResponseWriter = w
 		s.pluginManager.ExecutePlugins(pluginCtx, r)
+
+		if pluginCtx.RequestHandled {
+			return
+		}
 
 		req := msgPool.Get().(*dns.Msg)
 		defer func() {
@@ -62,6 +67,11 @@ func (s *Server) buildAndSetHandler() {
 		defer cancel()
 
 		msg, err := s.resolver.Resolve(ctx, req)
+
+		if key, ok := pluginCtx.Get("coalescer_key"); ok {
+			s.pluginManager.ExecuteResponsePlugins(key.(string), msg, err)
+		}
+
 		if err != nil {
 			log.Printf("Failed to resolve %s: %v", req.Question[0].Name, err)
 			s.metrics.RecordResponseCode(dns.RcodeToString[dns.RcodeServerFailure])
