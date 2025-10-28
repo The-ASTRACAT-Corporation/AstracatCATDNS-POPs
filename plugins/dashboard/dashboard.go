@@ -2,19 +2,23 @@ package dashboard
 
 import (
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
+	"os"
 
 	"dns-resolver/internal/config"
 	"dns-resolver/internal/metrics"
 	"dns-resolver/internal/plugins"
+	"dns-resolver/plugins/authoritative"
 	"github.com/miekg/dns"
 )
 
 type DashboardPlugin struct {
-	cfg     *config.Config
-	metrics *metrics.Metrics
-	zones   map[string][]dns.RR
+	cfg         *config.Config
+	metrics     *metrics.Metrics
+	authPlugin  *authoritative.AuthoritativePlugin
+	zones       map[string][]dns.RR
 }
 
 func (p *DashboardPlugin) Name() string {
@@ -26,11 +30,12 @@ func (p *DashboardPlugin) Execute(ctx *plugins.PluginContext, msg *dns.Msg) erro
 	return nil
 }
 
-func New(cfg *config.Config, metrics *metrics.Metrics) *DashboardPlugin {
+func New(cfg *config.Config, metrics *metrics.Metrics, authPlugin *authoritative.AuthoritativePlugin) *DashboardPlugin {
 	return &DashboardPlugin{
-		cfg:     cfg,
-		metrics: metrics,
-		zones:   make(map[string][]dns.RR),
+		cfg:        cfg,
+		metrics:    metrics,
+		authPlugin: authPlugin,
+		zones:      make(map[string][]dns.RR),
 	}
 }
 
@@ -62,26 +67,7 @@ func (p *DashboardPlugin) Start() {
 	http.HandleFunc("/zones/import", p.withBasicAuth(p.importZoneHandler))
 	http.HandleFunc("/zones/export", p.withBasicAuth(p.exportZoneHandler))
 
-	http.HandleFunc("/config", p.withBasicAuth(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		var data struct {
-			ServerRole string `json:"server-role"`
-		}
-
-		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
-			http.Error(w, "Bad request", http.StatusBadRequest)
-			return
-		}
-
-		p.cfg.ServerRole = data.ServerRole
-		log.Printf("Server role updated to: %s", p.cfg.ServerRole)
-
-		w.WriteHeader(http.StatusOK)
-	}))
+	http.HandleFunc("/config", p.withBasicAuth(p.configHandler))
 
 	log.Println("Starting dashboard server on :8080")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
@@ -129,24 +115,63 @@ func (p *DashboardPlugin) importZoneHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	file, _, err := r.FormFile("zonefile")
+	file, handler, err := r.FormFile("zonefile")
 	if err != nil {
 		http.Error(w, "Bad request", http.StatusBadRequest)
 		return
 	}
 	defer file.Close()
 
-	zoneParser := dns.NewZoneParser(file, "", "")
-	for rr, ok := zoneParser.Next(); ok; rr, ok = zoneParser.Next() {
-		if err := zoneParser.Err(); err != nil {
+	// Create a temporary file
+	tempFile, err := os.CreateTemp("", "zonefile-*.zone")
+	if err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer os.Remove(tempFile.Name())
+
+	// Copy the uploaded file to the temporary file
+	if _, err := io.Copy(tempFile, file); err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Load the zone from the temporary file
+	if err := p.authPlugin.LoadZone(tempFile.Name()); err != nil {
+		http.Error(w, "Failed to load zone", http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("Successfully imported zone from %s", handler.Filename)
+	w.WriteHeader(http.StatusOK)
+}
+
+func (p *DashboardPlugin) configHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		data := struct {
+			ServerRole string `json:"server_role"`
+		}{
+			ServerRole: p.cfg.ServerRole,
+		}
+		json.NewEncoder(w).Encode(data)
+	case http.MethodPost:
+		var data struct {
+			ServerRole string `json:"server-role"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
 			http.Error(w, "Bad request", http.StatusBadRequest)
 			return
 		}
-		zoneName := rr.Header().Name
-		p.zones[zoneName] = append(p.zones[zoneName], rr)
-	}
 
-	w.WriteHeader(http.StatusOK)
+		p.cfg.ServerRole = data.ServerRole
+		log.Printf("Server role updated to: %s", p.cfg.ServerRole)
+
+		w.WriteHeader(http.StatusOK)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (p *DashboardPlugin) exportZoneHandler(w http.ResponseWriter, r *http.Request) {
