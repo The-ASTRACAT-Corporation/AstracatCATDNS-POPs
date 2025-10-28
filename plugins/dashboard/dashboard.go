@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"dns-resolver/internal/plugins"
 	"dns-resolver/plugins/authoritative"
 	"github.com/miekg/dns"
+	"strconv"
+	"strings"
 )
 
 type DashboardPlugin struct {
@@ -66,6 +69,7 @@ func (p *DashboardPlugin) Start() {
 	http.HandleFunc("/zones", p.withBasicAuth(p.zonesHandler))
 	http.HandleFunc("/zones/import", p.withBasicAuth(p.importZoneHandler))
 	http.HandleFunc("/zones/export", p.withBasicAuth(p.exportZoneHandler))
+	http.HandleFunc("/zones/", p.withBasicAuth(p.recordsHandler))
 
 	http.HandleFunc("/config", p.withBasicAuth(p.configHandler))
 
@@ -78,11 +82,7 @@ func (p *DashboardPlugin) Start() {
 func (p *DashboardPlugin) zonesHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		// List zones
-		var zoneNames []string
-		for name := range p.zones {
-			zoneNames = append(zoneNames, name)
-		}
+		zoneNames := p.authPlugin.GetZoneNames()
 		json.NewEncoder(w).Encode(zoneNames)
 	case http.MethodPost:
 		var data struct {
@@ -142,6 +142,7 @@ func (p *DashboardPlugin) importZoneHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	p.zones[handler.Filename] = []dns.RR{}
 	log.Printf("Successfully imported zone from %s", handler.Filename)
 	w.WriteHeader(http.StatusOK)
 }
@@ -174,6 +175,109 @@ func (p *DashboardPlugin) configHandler(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
+func (p *DashboardPlugin) recordsHandler(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/zones/"), "/")
+	if len(parts) < 1 {
+		http.Error(w, "Bad request", http.StatusBadRequest)
+		return
+	}
+	zoneName := parts[0]
+
+	switch r.Method {
+	case http.MethodGet:
+		records, err := p.authPlugin.GetZoneRecords(zoneName)
+		if err != nil {
+			http.Error(w, "Zone not found", http.StatusNotFound)
+			return
+		}
+
+		// Convert records to a JSON-friendly format
+		var jsonRecords []map[string]interface{}
+		for _, record := range records {
+			parts := strings.Fields(record.RR.String())
+			value := strings.Join(parts[4:], " ")
+			jsonRecords = append(jsonRecords, map[string]interface{}{
+				"id":    record.ID,
+				"name":  record.RR.Header().Name,
+				"type":  dns.TypeToString[record.RR.Header().Rrtype],
+				"ttl":   record.RR.Header().Ttl,
+				"value": value,
+			})
+		}
+
+		json.NewEncoder(w).Encode(jsonRecords)
+	case http.MethodPost:
+		var data struct {
+			Name  string `json:"name"`
+			Type  string `json:"type"`
+			TTL   uint32 `json:"ttl"`
+			Value string `json:"value"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
+
+		rr, err := dns.NewRR(fmt.Sprintf("%s %d IN %s %s", data.Name, data.TTL, data.Type, data.Value))
+		if err != nil {
+			http.Error(w, "Invalid record", http.StatusBadRequest)
+			return
+		}
+
+		if err := p.authPlugin.AddZoneRecord(zoneName, rr); err != nil {
+			http.Error(w, "Failed to add record", http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusCreated)
+	case http.MethodPut:
+		recordId, err := strconv.Atoi(parts[2])
+		if err != nil {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
+
+		var data struct {
+			Name  string `json:"name"`
+			Type  string `json:"type"`
+			TTL   uint32 `json:"ttl"`
+			Value string `json:"value"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
+
+		rr, err := dns.NewRR(fmt.Sprintf("%s %d IN %s %s", data.Name, data.TTL, data.Type, data.Value))
+		if err != nil {
+			http.Error(w, "Invalid record", http.StatusBadRequest)
+			return
+		}
+
+		if err := p.authPlugin.UpdateZoneRecord(zoneName, recordId, rr); err != nil {
+			http.Error(w, "Failed to update record", http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+	case http.MethodDelete:
+		recordId, err := strconv.Atoi(parts[2])
+		if err != nil {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
+
+		if err := p.authPlugin.DeleteZoneRecord(zoneName, recordId); err != nil {
+			http.Error(w, "Failed to delete record", http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 func (p *DashboardPlugin) exportZoneHandler(w http.ResponseWriter, r *http.Request) {
 	zoneName := r.URL.Query().Get("zone")
 	if zoneName == "" {
@@ -181,14 +285,14 @@ func (p *DashboardPlugin) exportZoneHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	records, ok := p.zones[zoneName]
-	if !ok {
+	records, err := p.authPlugin.GetZoneRecords(zoneName)
+	if err != nil {
 		http.Error(w, "Zone not found", http.StatusNotFound)
 		return
 	}
 
 	w.Header().Set("Content-Disposition", "attachment; filename="+zoneName)
-	for _, rr := range records {
-		w.Write([]byte(rr.String() + "\n"))
+	for _, record := range records {
+		w.Write([]byte(record.RR.String() + "\n"))
 	}
 }

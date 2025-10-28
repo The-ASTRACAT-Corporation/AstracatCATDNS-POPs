@@ -1,15 +1,24 @@
 package authoritative
 
 import (
+	"fmt"
 	"log"
 	"os"
 
+	"bufio"
 	"dns-resolver/internal/plugins"
 	"github.com/miekg/dns"
+	"strings"
 )
 
+type Record struct {
+	ID int
+	RR dns.RR
+}
+
 type AuthoritativePlugin struct {
-	zones map[string][]dns.RR
+	zones        map[string][]Record
+	nextRecordID int
 }
 
 func (p *AuthoritativePlugin) Name() string {
@@ -35,9 +44,9 @@ func (p *AuthoritativePlugin) Execute(ctx *plugins.PluginContext, msg *dns.Msg) 
 
 	// Find the matching records in the zone
 	// This is a simplified implementation and may not handle all cases
-	for _, rr := range zone {
-		if rr.Header().Name == q.Name && rr.Header().Rrtype == q.Qtype {
-			res.Answer = append(res.Answer, rr)
+	for _, record := range zone {
+		if record.RR.Header().Name == q.Name && record.RR.Header().Rrtype == q.Qtype {
+			res.Answer = append(res.Answer, record.RR)
 		}
 	}
 
@@ -50,9 +59,12 @@ func (p *AuthoritativePlugin) Execute(ctx *plugins.PluginContext, msg *dns.Msg) 
 }
 
 func New() *AuthoritativePlugin {
-	return &AuthoritativePlugin{
-		zones: make(map[string][]dns.RR),
+	p := &AuthoritativePlugin{
+		zones:        make(map[string][]Record),
+		nextRecordID: 1,
 	}
+	// p.LoadZone("example.com.zone")
+	return p
 }
 
 func (p *AuthoritativePlugin) LoadZone(zoneFile string) error {
@@ -62,13 +74,92 @@ func (p *AuthoritativePlugin) LoadZone(zoneFile string) error {
 	}
 	defer file.Close()
 
-	zoneParser := dns.NewZoneParser(file, "", zoneFile)
+	var zoneName string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "$ORIGIN") {
+			parts := strings.Fields(line)
+			if len(parts) > 1 {
+				zoneName = parts[1]
+				break
+			}
+		}
+	}
+
+	if zoneName == "" {
+		return fmt.Errorf("could not find $ORIGIN in zone file: %s", zoneFile)
+	}
+
+	// Reset the file reader to the beginning
+	file.Seek(0, 0)
+
+	zoneParser := dns.NewZoneParser(file, zoneName, zoneFile)
 	for rr, ok := zoneParser.Next(); ok; rr, ok = zoneParser.Next() {
 		if err := zoneParser.Err(); err != nil {
 			return err
 		}
-		zoneName := rr.Header().Name
-		p.zones[zoneName] = append(p.zones[zoneName], rr)
+		p.zones[zoneName] = append(p.zones[zoneName], Record{ID: p.nextRecordID, RR: rr})
+		p.nextRecordID++
 	}
+	log.Printf("Loaded %d records for zone %s", len(p.zones[zoneName]), zoneName)
 	return nil
+}
+
+func (p *AuthoritativePlugin) GetZoneRecords(zoneName string) ([]Record, error) {
+	records, ok := p.zones[zoneName]
+	if !ok {
+		return nil, fmt.Errorf("zone not found: %s", zoneName)
+	}
+	return records, nil
+}
+
+func (p *AuthoritativePlugin) AddZoneRecord(zoneName string, rr dns.RR) error {
+	if _, ok := p.zones[zoneName]; !ok {
+		return fmt.Errorf("zone not found: %s", zoneName)
+	}
+	p.zones[zoneName] = append(p.zones[zoneName], Record{ID: p.nextRecordID, RR: rr})
+	p.nextRecordID++
+	return nil
+}
+
+func (p *AuthoritativePlugin) UpdateZoneRecord(zoneName string, recordId int, newRR dns.RR) error {
+	records, ok := p.zones[zoneName]
+	if !ok {
+		return fmt.Errorf("zone not found: %s", zoneName)
+	}
+
+	for i, record := range records {
+		if record.ID == recordId {
+			records[i].RR = newRR
+			p.zones[zoneName] = records
+			return nil
+		}
+	}
+
+	return fmt.Errorf("record not found")
+}
+
+func (p *AuthoritativePlugin) DeleteZoneRecord(zoneName string, recordId int) error {
+	records, ok := p.zones[zoneName]
+	if !ok {
+		return fmt.Errorf("zone not found: %s", zoneName)
+	}
+
+	for i, record := range records {
+		if record.ID == recordId {
+			p.zones[zoneName] = append(records[:i], records[i+1:]...)
+			return nil
+		}
+	}
+
+	return fmt.Errorf("record not found")
+}
+
+func (p *AuthoritativePlugin) GetZoneNames() []string {
+	var names []string
+	for name := range p.zones {
+		names = append(names, name)
+	}
+	return names
 }
