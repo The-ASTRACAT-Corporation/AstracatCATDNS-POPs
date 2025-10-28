@@ -1,3 +1,6 @@
 # Ignore log files
 *.log
+
+# Ignore compiled binaries
 dns-resolver
+astracat-dns

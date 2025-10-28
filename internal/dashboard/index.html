@@ -161,6 +161,52 @@
         </div>
     </div>
 
+    <div class="container" id="zone-records-container" style="display: none;">
+        <div class="table-card" style="width: 90%;">
+            <h2 id="zone-records-title"></h2>
+            <button onclick="hideZoneRecords()">Back to Zones</button>
+            <button onclick="showAddRecordModal()">Add Record</button>
+            <table id="zone-records-table">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Type</th>
+                        <th>TTL</th>
+                        <th>Value</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div id="record-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5);">
+        <div style="background-color: #fff; margin: 15% auto; padding: 20px; border: 1px solid #888; width: 80%;">
+            <h2 id="modal-title"></h2>
+            <form id="record-form">
+                <input type="hidden" id="record-id" name="record-id">
+                <label for="record-name">Name:</label>
+                <input type="text" id="record-name" name="record-name" required>
+                <label for="record-type">Type:</label>
+                <select id="record-type" name="record-type">
+                    <option value="A">A</option>
+                    <option value="AAAA">AAAA</option>
+                    <option value="CNAME">CNAME</option>
+                    <option value="MX">MX</option>
+                    <option value="TXT">TXT</option>
+                </select>
+                <label for="record-ttl">TTL:</label>
+                <input type="number" id="record-ttl" name="record-ttl" value="3600" required>
+                <label for="record-value">Value:</label>
+                <input type="text" id="record-value" name="record-value" required>
+                <button type="submit">Save</button>
+                <button type="button" onclick="hideRecordModal()">Cancel</button>
+            </form>
+        </div>
+    </div>
+
     <script>
         function fetchMetrics() {
             fetch('/metrics.json')
@@ -209,6 +255,7 @@
             fetch('/zones')
                 .then(response => response.json())
                 .then(data => {
+                    console.log('Fetched zones:', data);
                     const tableBody = document.getElementById('zones-table').getElementsByTagName('tbody')[0];
                     tableBody.innerHTML = ''; // Clear existing rows
                     if (data) {
@@ -216,11 +263,12 @@
                             const row = tableBody.insertRow();
                             const nameCell = row.insertCell(0);
                             const actionsCell = row.insertCell(1);
-                            nameCell.textContent = zone.name;
+                            nameCell.textContent = zone;
                             actionsCell.innerHTML = `
-                                <button onclick="showEditZoneModal('${zone.name}')">Edit</button>
-                                <button onclick="deleteZone('${zone.name}')">Delete</button>
-                                <button onclick="exportZone('${zone.name}')">Export</button>
+                                <button onclick="showZoneRecords('${zone}')">Manage</button>
+                                <button onclick="showEditZoneModal('${zone}')">Edit</button>
+                                <button onclick="deleteZone('${zone}')">Delete</button>
+                                <button onclick="exportZone('${zone}')">Export</button>
                             `;
                         });
                     }
@@ -242,6 +290,102 @@
 
         function exportZone(zoneName) {
             // ...
+        }
+
+        function showZoneRecords(zoneName) {
+            document.getElementById('zone-management-container').style.display = 'none';
+            document.getElementById('zone-records-container').style.display = 'flex';
+            document.getElementById('zone-records-title').textContent = 'Managing Zone: ' + zoneName;
+            fetchZoneRecords(zoneName);
+        }
+
+        function hideZoneRecords() {
+            document.getElementById('zone-management-container').style.display = 'flex';
+            document.getElementById('zone-records-container').style.display = 'none';
+        }
+
+        function fetchZoneRecords(zoneName) {
+            fetch(`/zones/${zoneName}/records`)
+                .then(response => response.json())
+                .then(data => {
+                    const tableBody = document.getElementById('zone-records-table').getElementsByTagName('tbody')[0];
+                    tableBody.innerHTML = ''; // Clear existing rows
+                    if (data) {
+                        data.forEach(record => {
+                            const row = tableBody.insertRow();
+                            const nameCell = row.insertCell(0);
+                            const typeCell = row.insertCell(1);
+                            const ttlCell = row.insertCell(2);
+                            const valueCell = row.insertCell(3);
+                            const actionsCell = row.insertCell(4);
+
+                            nameCell.textContent = record.name;
+                            typeCell.textContent = record.type;
+                            ttlCell.textContent = record.ttl;
+                            valueCell.textContent = record.value;
+                            actionsCell.innerHTML = `
+                                <button onclick="showEditRecordModal('${zoneName}', '${record.id}')">Edit</button>
+                                <button onclick="deleteRecord('${zoneName}', '${record.id}')">Delete</button>
+                            `;
+                        });
+                    }
+                })
+                .catch(error => console.error('Error fetching zone records:', error));
+        }
+
+        function showAddRecordModal() {
+            // ...
+        }
+
+        function showEditRecordModal(zoneName, recordId) {
+            // ...
+        }
+
+        function deleteRecord(zoneName, recordId) {
+            if (confirm('Are you sure you want to delete this record?')) {
+                fetch(`/zones/${zoneName}/records/${recordId}`, {
+                    method: 'DELETE',
+                })
+                .then(response => {
+                    if (response.ok) {
+                        fetchZoneRecords(zoneName);
+                    } else {
+                        alert('Failed to delete record.');
+                    }
+                })
+                .catch(error => {
+                    console.error('Error deleting record:', error);
+                    alert('An error occurred while deleting the record.');
+                });
+            }
+        }
+
+        function showAddRecordModal() {
+            document.getElementById('modal-title').textContent = 'Add Record';
+            document.getElementById('record-form').reset();
+            document.getElementById('record-modal').style.display = 'block';
+        }
+
+        function showEditRecordModal(zoneName, recordId) {
+            fetch(`/zones/${zoneName}/records`)
+                .then(response => response.json())
+                .then(data => {
+                    const record = data.find(r => r.id == recordId);
+                    if (record) {
+                        document.getElementById('modal-title').textContent = 'Edit Record';
+                        document.getElementById('record-id').value = record.id;
+                        document.getElementById('record-name').value = record.name;
+                        document.getElementById('record-type').value = record.type;
+                        document.getElementById('record-ttl').value = record.ttl;
+                        document.getElementById('record-value').value = record.value;
+                        document.getElementById('record-modal').style.display = 'block';
+                    }
+                })
+                .catch(error => console.error('Error fetching record:', error));
+        }
+
+        function hideRecordModal() {
+            document.getElementById('record-modal').style.display = 'none';
         }
 
         function importZoneFile() {
@@ -299,6 +443,47 @@
                 masterConfig.style.display = 'none';
                 slaveConfig.style.display = 'none';
             }
+        });
+
+        document.getElementById('record-form').addEventListener('submit', function(event) {
+            event.preventDefault();
+            const formData = new FormData(this);
+            const recordId = formData.get('record-id');
+            const zoneName = document.getElementById('zone-records-title').textContent.replace('Managing Zone: ', '');
+
+            const data = {
+                name: formData.get('record-name'),
+                type: formData.get('record-type'),
+                ttl: parseInt(formData.get('record-ttl')),
+                value: formData.get('record-value'),
+            };
+
+            let url = `/zones/${zoneName}/records`;
+            let method = 'POST';
+            if (recordId) {
+                url += `/${recordId}`;
+                method = 'PUT';
+            }
+
+            fetch(url, {
+                method: method,
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(data),
+            })
+            .then(response => {
+                if (response.ok) {
+                    hideRecordModal();
+                    fetchZoneRecords(zoneName);
+                } else {
+                    alert('Failed to save record.');
+                }
+            })
+            .catch(error => {
+                console.error('Error saving record:', error);
+                alert('An error occurred while saving the record.');
+            });
         });
 
         document.getElementById('server-config-form').addEventListener('submit', function(event) {
