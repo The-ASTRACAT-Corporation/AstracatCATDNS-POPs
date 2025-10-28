@@ -82,6 +82,31 @@
             </table>
         </div>
     </div>
+
+    <div class="container">
+        <div class="table-card" style="width: 90%;">
+            <h2>Server Configuration</h2>
+            <form id="server-config-form">
+                <label for="server-role">Server Role:</label>
+                <select id="server-role" name="server-role">
+                    <option value="standalone">Standalone</option>
+                    <option value="master">Master</option>
+                    <option value="slave">Slave</option>
+                </select>
+                <div id="master-config" style="display: none;">
+                    <h3>Master Configuration</h3>
+                    <label for="slave-ips">Slave IPs:</label>
+                    <input type="text" id="slave-ips" name="slave-ips" placeholder="e.g., 192.168.1.10, 192.168.1.11">
+                </div>
+                <div id="slave-config" style="display: none;">
+                    <h3>Slave Configuration</h3>
+                    <label for="master-ip">Master IP:</label>
+                    <input type="text" id="master-ip" name="master-ip" placeholder="e.g., 192.168.1.1">
+                </div>
+                <button type="submit">Save Configuration</button>
+            </form>
+        </div>
+    </div>
     <div class="container">
         <div class="table-card">
             <h2>Query Types</h2>
@@ -103,6 +128,25 @@
                     <tr>
                         <th>Code</th>
                         <th>Count</th>
+                    </tr>
+                </thead>
+                <tbody>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="table-card" style="width: 90%;">
+            <h2>Zone Management</h2>
+            <button onclick="showAddZoneModal()">Add Zone</button>
+            <input type="file" id="zone-file-input" style="display: none;" onchange="importZoneFile()">
+            <button onclick="document.getElementById('zone-file-input').click()">Import BIND9 Zone File</button>
+            <table id="zones-table">
+                <thead>
+                    <tr>
+                        <th>Zone Name</th>
+                        <th>Actions</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -154,6 +198,93 @@
         // Fetch metrics on page load and then every 2 seconds
         fetchMetrics();
         setInterval(fetchMetrics, 2000);
+
+        function fetchZones() {
+            fetch('/zones')
+                .then(response => response.json())
+                .then(data => {
+                    const tableBody = document.getElementById('zones-table').getElementsByTagName('tbody')[0];
+                    tableBody.innerHTML = ''; // Clear existing rows
+                    if (data) {
+                        data.forEach(zone => {
+                            const row = tableBody.insertRow();
+                            const nameCell = row.insertCell(0);
+                            const actionsCell = row.insertCell(1);
+                            nameCell.textContent = zone.name;
+                            actionsCell.innerHTML = `
+                                <button onclick="showEditZoneModal('${zone.name}')">Edit</button>
+                                <button onclick="deleteZone('${zone.name}')">Delete</button>
+                                <button onclick="exportZone('${zone.name}')">Export</button>
+                            `;
+                        });
+                    }
+                })
+                .catch(error => console.error('Error fetching zones:', error));
+        }
+
+        function showAddZoneModal() {
+            // ...
+        }
+
+        function showEditZoneModal(zoneName) {
+            // ...
+        }
+
+        function deleteZone(zoneName) {
+            // ...
+        }
+
+        function exportZone(zoneName) {
+            // ...
+        }
+
+        function importZoneFile() {
+            // ...
+        }
+
+        fetchZones();
+
+        document.getElementById('server-role').addEventListener('change', function() {
+            const masterConfig = document.getElementById('master-config');
+            const slaveConfig = document.getElementById('slave-config');
+            if (this.value === 'master') {
+                masterConfig.style.display = 'block';
+                slaveConfig.style.display = 'none';
+            } else if (this.value === 'slave') {
+                masterConfig.style.display = 'none';
+                slaveConfig.style.display = 'block';
+            } else {
+                masterConfig.style.display = 'none';
+                slaveConfig.style.display = 'none';
+            }
+        });
+
+        document.getElementById('server-config-form').addEventListener('submit', function(event) {
+            event.preventDefault();
+            const formData = new FormData(this);
+            const data = {};
+            formData.forEach((value, key) => {
+                data[key] = value;
+            });
+            fetch('/config', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(data),
+            })
+            .then(response => {
+                if (response.ok) {
+                    alert('Configuration saved successfully!');
+                } else {
+                    alert('Failed to save configuration.');
+                }
+            })
+            .catch(error => {
+                console.error('Error saving configuration:', error);
+                alert('An error occurred while saving the configuration.');
+            });
+        });
     </script>
 </body>
 </html>

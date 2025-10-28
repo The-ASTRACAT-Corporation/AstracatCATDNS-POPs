@@ -200,7 +200,6 @@ func (m *Metrics) StartMetricsServer(addr string) {
 		},
 	))
 
-	http.HandleFunc("/metrics.json", m.jsonMetricsHandler)
 	http.HandleFunc("/dashboard", m.dashboardHandler)
 
 	// Добавляем эндпоинт для проверки здоровья
@@ -220,8 +219,8 @@ func (m *Metrics) dashboardHandler(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, "internal/dashboard/index.html")
 }
 
-// jsonMetricsHandler serves metrics in JSON format for the dashboard.
-func (m *Metrics) jsonMetricsHandler(w http.ResponseWriter, r *http.Request) {
+// JSONMetricsHandler serves metrics in JSON format for the dashboard.
+func (m *Metrics) JSONMetricsHandler(w http.ResponseWriter, r *http.Request) {
 	m.RLock()
 	defer m.RUnlock()
 

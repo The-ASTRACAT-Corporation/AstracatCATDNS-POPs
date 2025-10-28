@@ -11,6 +11,8 @@ import (
 	"dns-resolver/internal/plugins"
 	"dns-resolver/internal/resolver"
 	"dns-resolver/internal/server"
+	"dns-resolver/plugins/authoritative"
+	"dns-resolver/plugins/dashboard"
 	"dns-resolver/plugins/example_logger"
 )
 
@@ -65,6 +67,14 @@ func main() {
 	// Register the example logger plugin
 	loggerPlugin := example_logger.New()
 	pm.Register(loggerPlugin)
+
+	// Register the authoritative DNS plugin
+	authoritativePlugin := authoritative.New()
+	pm.Register(authoritativePlugin)
+
+	// Register and start the dashboard plugin
+	dashboardPlugin := dashboard.New(cfg, m)
+	go dashboardPlugin.Start()
 
 	// Create and start the server
 	srv := server.NewServer(cfg, m, res, pm)
