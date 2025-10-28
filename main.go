@@ -73,7 +73,7 @@ func main() {
 	pm.Register(authoritativePlugin)
 
 	// Register and start the dashboard plugin
-	dashboardPlugin := dashboard.New(cfg, m)
+	dashboardPlugin := dashboard.New(cfg, m, authoritativePlugin)
 	go dashboardPlugin.Start()
 
 	// Create and start the server

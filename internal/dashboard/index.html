@@ -137,6 +137,12 @@
     </div>
 
     <div class="container">
+        <div class="metric-card">
+            <h2>Server Role</h2>
+            <div id="server-role-status" class="value">Unknown</div>
+        </div>
+    </div>
+    <div class="container">
         <div class="table-card" style="width: 90%;">
             <h2>Zone Management</h2>
             <button onclick="showAddZoneModal()">Add Zone</button>
@@ -239,10 +245,46 @@
         }
 
         function importZoneFile() {
-            // ...
+            const fileInput = document.getElementById('zone-file-input');
+            const file = fileInput.files[0];
+            if (!file) {
+                alert('Please select a zone file to import.');
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('zonefile', file);
+
+            fetch('/zones/import', {
+                method: 'POST',
+                body: formData,
+            })
+            .then(response => {
+                if (response.ok) {
+                    alert('Zone file imported successfully!');
+                    fetchZones(); // Refresh the zones list
+                } else {
+                    alert('Failed to import zone file.');
+                }
+            })
+            .catch(error => {
+                console.error('Error importing zone file:', error);
+                alert('An error occurred while importing the zone file.');
+            });
+        }
+
+        function fetchServerRole() {
+            fetch('/config')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('server-role-status').textContent = data.server_role;
+                    document.getElementById('server-role').value = data.server_role;
+                })
+                .catch(error => console.error('Error fetching server role:', error));
         }
 
         fetchZones();
+        fetchServerRole();
 
         document.getElementById('server-role').addEventListener('change', function() {
             const masterConfig = document.getElementById('master-config');
