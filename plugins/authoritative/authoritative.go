@@ -171,3 +171,23 @@ func (p *AuthoritativePlugin) DeleteZone(zoneName string) error {
 	delete(p.zones, zoneName)
 	return nil
 }
+
+func (p *AuthoritativePlugin) AddZone(zoneName string) error {
+	if _, ok := p.zones[zoneName]; ok {
+		return fmt.Errorf("zone already exists: %s", zoneName)
+	}
+	p.zones[zoneName] = []Record{}
+	return nil
+}
+
+func (p *AuthoritativePlugin) UpdateZone(oldName, newName string) error {
+	if _, ok := p.zones[oldName]; !ok {
+		return fmt.Errorf("zone not found: %s", oldName)
+	}
+	if _, ok := p.zones[newName]; ok {
+		return fmt.Errorf("zone already exists: %s", newName)
+	}
+	p.zones[newName] = p.zones[oldName]
+	delete(p.zones, oldName)
+	return nil
+}

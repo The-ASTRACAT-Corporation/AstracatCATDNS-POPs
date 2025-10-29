@@ -82,6 +82,33 @@ func (p *DashboardPlugin) zonesHandler(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		zoneNames := p.authPlugin.GetZoneNames()
 		json.NewEncoder(w).Encode(zoneNames)
+	case http.MethodPost:
+		var data struct {
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
+		if err := p.authPlugin.AddZone(data.Name); err != nil {
+			http.Error(w, "Failed to add zone", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	case http.MethodPut:
+		var data struct {
+			OldName string `json:"oldName"`
+			NewName string `json:"newName"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
+		if err := p.authPlugin.UpdateZone(data.OldName, data.NewName); err != nil {
+			http.Error(w, "Failed to update zone", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
 	case http.MethodDelete:
 		var data struct {
 			Name string `json:"name"`
@@ -197,6 +224,10 @@ func (p *DashboardPlugin) recordsHandler(w http.ResponseWriter, r *http.Request)
 
 		json.NewEncoder(w).Encode(jsonRecords)
 	case http.MethodPost:
+		if len(parts) < 2 || parts[1] != "records" {
+			http.Error(w, "POST should be to /zones/{zoneName}/records", http.StatusBadRequest)
+			return
+		}
 		var data struct {
 			Name  string `json:"name"`
 			Type  string `json:"type"`
@@ -221,6 +252,10 @@ func (p *DashboardPlugin) recordsHandler(w http.ResponseWriter, r *http.Request)
 
 		w.WriteHeader(http.StatusCreated)
 	case http.MethodPut:
+		if len(parts) < 3 || parts[1] != "records" {
+			http.Error(w, "PUT should be to /zones/{zoneName}/records/{id}", http.StatusBadRequest)
+			return
+		}
 		recordId, err := strconv.Atoi(parts[2])
 		if err != nil {
 			http.Error(w, "Bad request", http.StatusBadRequest)
@@ -251,6 +286,10 @@ func (p *DashboardPlugin) recordsHandler(w http.ResponseWriter, r *http.Request)
 
 		w.WriteHeader(http.StatusOK)
 	case http.MethodDelete:
+		if len(parts) < 3 || parts[1] != "records" {
+			http.Error(w, "DELETE should be to /zones/{zoneName}/records/{id}", http.StatusBadRequest)
+			return
+		}
 		recordId, err := strconv.Atoi(parts[2])
 		if err != nil {
 			http.Error(w, "Bad request", http.StatusBadRequest)
