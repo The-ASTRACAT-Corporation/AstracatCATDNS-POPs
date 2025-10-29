@@ -25,15 +25,31 @@ func (p *AuthoritativePlugin) Name() string {
 	return "Authoritative"
 }
 
+func (p *AuthoritativePlugin) findZone(qName string) (string, bool) {
+	var bestMatch string
+	var found bool
+
+	for zoneName := range p.zones {
+		if strings.HasSuffix(qName, zoneName) {
+			if len(zoneName) > len(bestMatch) {
+				bestMatch = zoneName
+				found = true
+			}
+		}
+	}
+	return bestMatch, found
+}
+
 func (p *AuthoritativePlugin) Execute(ctx *plugins.PluginContext, msg *dns.Msg) error {
 	q := msg.Question[0]
 
 	// Check if we are authoritative for the queried domain
-	zone, ok := p.zones[q.Name]
+	zoneName, ok := p.findZone(q.Name)
 	if !ok {
 		// We are not authoritative, so let the recursive resolver handle it
 		return nil
 	}
+	zone := p.zones[zoneName]
 
 	// We are authoritative, so we need to handle the query
 	log.Printf("[%s] Handling authoritative query for: %s", p.Name(), q.Name)
@@ -49,6 +65,11 @@ func (p *AuthoritativePlugin) Execute(ctx *plugins.PluginContext, msg *dns.Msg) 
 			res.Answer = append(res.Answer, record.RR)
 		}
 	}
+
+	// If no records are found, it might be an NXDOMAIN, but for now, we'll
+	// just return an empty response, which will be interpreted as NXDOMAIN
+	// by most clients. A more complete implementation would add an SOA record
+	// to the authority section for a proper NXDOMAIN response.
 
 	// Send the response back to the client
 	ctx.ResponseWriter.WriteMsg(res)
