@@ -69,7 +69,7 @@ func main() {
 	pm.Register(loggerPlugin)
 
 	// Register the authoritative DNS plugin
-	authoritativePlugin := authoritative.New()
+	authoritativePlugin := authoritative.New("zones.json")
 	pm.Register(authoritativePlugin)
 
 	// Register and start the dashboard plugin
