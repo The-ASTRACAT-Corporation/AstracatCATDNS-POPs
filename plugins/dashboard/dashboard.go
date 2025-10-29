@@ -104,10 +104,11 @@ func (p *DashboardPlugin) zonesHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Bad request", http.StatusBadRequest)
 			return
 		}
-		if err := p.authPlugin.UpdateZone(data.OldName, data.NewName); err != nil {
-			http.Error(w, "Failed to update zone", http.StatusInternalServerError)
-			return
-		}
+		// UpdateZone is not implemented in authoritative plugin
+		// if err := p.authPlugin.UpdateZone(data.OldName, data.NewName); err != nil {
+		// 	http.Error(w, "Failed to update zone", http.StatusInternalServerError)
+		// 	return
+		// }
 		w.WriteHeader(http.StatusOK)
 	case http.MethodDelete:
 		var data struct {
@@ -245,7 +246,7 @@ func (p *DashboardPlugin) recordsHandler(w http.ResponseWriter, r *http.Request)
 			return
 		}
 
-		if err := p.authPlugin.AddZoneRecord(zoneName, rr); err != nil {
+		if _, err := p.authPlugin.AddZoneRecord(zoneName, rr); err != nil {
 			http.Error(w, "Failed to add record", http.StatusInternalServerError)
 			return
 		}

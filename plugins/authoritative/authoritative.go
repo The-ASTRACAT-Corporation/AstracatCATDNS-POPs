@@ -10,6 +10,7 @@ package authoritative
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,14 +20,20 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/miekg/dns"
 	"dns-resolver/internal/plugins"
+	"github.com/miekg/dns"
 )
 
 // Record wraps a dns.RR with an internal ID and keeps original TTL
 type Record struct {
-	ID  int
-	RR  dns.RR
+	ID int
+	RR dns.RR
+}
+
+// RecordDTO is a serializable representation of a Record
+type RecordDTO struct {
+	ID   int    `json:"id"`
+	Data string `json:"data"`
 }
 
 // Zone holds parsed records indexed for fast lookup
@@ -43,18 +50,124 @@ type Zone struct {
 	mu sync.RWMutex
 }
 
+// ZoneDTO is a serializable representation of a Zone
+type ZoneDTO struct {
+	Name    string      `json:"name"`
+	Records []RecordDTO `json:"records"`
+}
+
 // AuthoritativePlugin is thread-safe and intended for production use
 type AuthoritativePlugin struct {
 	zones        map[string]*Zone // key: FQDN zone name
 	nextRecordID int
 	mu           sync.RWMutex // protects zones map and nextRecordID
+	filePath     string
+	fileMu       sync.Mutex
 }
 
-func New() *AuthoritativePlugin {
-	return &AuthoritativePlugin{
+func New(filePath string) *AuthoritativePlugin {
+	p := &AuthoritativePlugin{
 		zones:        make(map[string]*Zone),
 		nextRecordID: 1,
+		filePath:     filePath,
 	}
+	if err := p.loadFromFile(); err != nil {
+		log.Printf("Could not load zones from file: %v", err)
+	}
+	return p
+}
+
+func (p *AuthoritativePlugin) saveToFile() error {
+	p.fileMu.Lock()
+	defer p.fileMu.Unlock()
+
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	var zoneDTOs []ZoneDTO
+	for _, zone := range p.zones {
+		var recordDTOs []RecordDTO
+		zone.mu.RLock()
+		for _, typeMap := range zone.records {
+			for _, records := range typeMap {
+				for _, record := range records {
+					recordDTOs = append(recordDTOs, RecordDTO{
+						ID:   record.ID,
+						Data: record.RR.String(),
+					})
+				}
+			}
+		}
+		zone.mu.RUnlock()
+		zoneDTOs = append(zoneDTOs, ZoneDTO{
+			Name:    zone.Name,
+			Records: recordDTOs,
+		})
+	}
+
+	data, err := json.MarshalIndent(zoneDTOs, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(p.filePath, data, 0644)
+}
+
+func (p *AuthoritativePlugin) loadFromFile() error {
+	p.fileMu.Lock()
+	defer p.fileMu.Unlock()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	data, err := os.ReadFile(p.filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // File doesn't exist yet, which is fine
+		}
+		return err
+	}
+
+	var zoneDTOs []ZoneDTO
+	if err := json.Unmarshal(data, &zoneDTOs); err != nil {
+		return err
+	}
+
+	p.zones = make(map[string]*Zone)
+	maxID := 0
+	for _, zd := range zoneDTOs {
+		z := &Zone{
+			Name:    zd.Name,
+			records: make(map[string]map[uint16][]Record),
+		}
+		for _, rd := range zd.Records {
+			rr, err := dns.NewRR(rd.Data)
+			if err != nil {
+				log.Printf("Error parsing record from file: %v", err)
+				continue
+			}
+			name := dns.Fqdn(strings.ToLower(rr.Header().Name))
+			if _, ok := z.records[name]; !ok {
+				z.records[name] = make(map[uint16][]Record)
+			}
+			z.records[name][rr.Header().Rrtype] = append(z.records[name][rr.Header().Rrtype], Record{ID: rd.ID, RR: rr})
+			if rd.ID > maxID {
+				maxID = rd.ID
+			}
+
+			// collect soa and ns records separately
+			switch v := rr.(type) {
+			case *dns.SOA:
+				z.soa = v
+			case *dns.NS:
+				z.nsRecords = append(z.nsRecords, v)
+			}
+		}
+		p.zones[z.Name] = z
+	}
+	p.nextRecordID = maxID + 1
+
+	return nil
 }
 
 func (p *AuthoritativePlugin) Name() string { return "Authoritative" }
@@ -98,6 +211,12 @@ func (p *AuthoritativePlugin) Execute(ctx *plugins.PluginContext, msg *dns.Msg) 
 	}
 
 	log.Printf("[%s] authoritative handling for %s (qtype=%d)", p.Name(), q.Name, q.Qtype)
+
+	if q.Qtype == dns.TypeAXFR {
+		p.handleAXFR(ctx, msg, zone)
+		ctx.Stop = true
+		return nil
+	}
 
 	res := &dns.Msg{}
 	res.SetReply(msg)
@@ -152,6 +271,26 @@ func (p *AuthoritativePlugin) Execute(ctx *plugins.PluginContext, msg *dns.Msg) 
 	ctx.ResponseWriter.WriteMsg(res)
 	ctx.Stop = true
 	return nil
+}
+
+func (p *AuthoritativePlugin) handleAXFR(ctx *plugins.PluginContext, msg *dns.Msg, zone *Zone) {
+	records, err := p.GetZoneRecords(zone.Name)
+	if err != nil {
+		log.Printf("Error getting zone records for AXFR: %v", err)
+		return
+	}
+
+	ch := make(chan *dns.Envelope)
+	tr := new(dns.Transfer)
+	tr.Out(ctx.ResponseWriter, msg, ch)
+
+	var rrs []dns.RR
+	for _, r := range records {
+		rrs = append(rrs, r.RR)
+	}
+
+	ch <- &dns.Envelope{RR: rrs}
+	close(ch)
 }
 
 // addAuthorityAndGlue populates Authority with NS records and Additional with glue A/AAAA if present
@@ -319,7 +458,7 @@ func (p *AuthoritativePlugin) AddZone(zoneName string) error {
 		Name:    zn,
 		records: make(map[string]map[uint16][]Record),
 	}
-	return nil
+	return p.saveToFile()
 }
 
 func (p *AuthoritativePlugin) DeleteZone(zoneName string) error {
@@ -330,7 +469,7 @@ func (p *AuthoritativePlugin) DeleteZone(zoneName string) error {
 		return fmt.Errorf("zone not found: %s", zoneName)
 	}
 	delete(p.zones, zn)
-	return nil
+	return p.saveToFile()
 }
 
 // AddZoneRecord inserts RR into an existing zone. RR owner name is used as key.
@@ -361,6 +500,10 @@ func (p *AuthoritativePlugin) AddZoneRecord(zoneName string, rr dns.RR) (int, er
 	case *dns.SOA:
 		z.soa = v
 	}
+
+	if err := p.saveToFile(); err != nil {
+		return 0, err
+	}
 	return id, nil
 }
 
@@ -386,7 +529,7 @@ func (p *AuthoritativePlugin) UpdateZoneRecord(zoneName string, recordId int, ne
 					case *dns.SOA:
 						z.soa = v
 					}
-					return nil
+					return p.saveToFile()
 				}
 			}
 		}
@@ -409,7 +552,7 @@ func (p *AuthoritativePlugin) DeleteZoneRecord(zoneName string, recordId int) er
 			for i, r := range arr {
 				if r.ID == recordId {
 					z.records[name][t] = append(arr[:i], arr[i+1:]...)
-					return nil
+					return p.saveToFile()
 				}
 			}
 		}
