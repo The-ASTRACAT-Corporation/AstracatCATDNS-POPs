@@ -333,14 +333,6 @@
                 .catch(error => console.error('Error fetching zone records:', error));
         }
 
-        function showAddRecordModal() {
-            // ...
-        }
-
-        function showEditRecordModal(zoneName, recordId) {
-            // ...
-        }
-
         function deleteRecord(zoneName, recordId) {
             if (confirm('Are you sure you want to delete this record?')) {
                 fetch(`/zones/${zoneName}/records/${recordId}`, {

@@ -163,3 +163,11 @@ func (p *AuthoritativePlugin) GetZoneNames() []string {
 	}
 	return names
 }
+
+func (p *AuthoritativePlugin) DeleteZone(zoneName string) error {
+	if _, ok := p.zones[zoneName]; !ok {
+		return fmt.Errorf("zone not found: %s", zoneName)
+	}
+	delete(p.zones, zoneName)
+	return nil
+}
