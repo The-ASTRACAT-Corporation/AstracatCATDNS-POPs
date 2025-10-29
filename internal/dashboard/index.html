@@ -142,7 +142,7 @@
             <div id="server-role-status" class="value">Unknown</div>
         </div>
     </div>
-    <div class="container">
+    <div class="container" id="zone-management-container">
         <div class="table-card" style="width: 90%;">
             <h2>Zone Management</h2>
             <button onclick="showAddZoneModal()">Add Zone</button>
@@ -203,6 +203,18 @@
                 <input type="text" id="record-value" name="record-value" required>
                 <button type="submit">Save</button>
                 <button type="button" onclick="hideRecordModal()">Cancel</button>
+            </form>
+        </div>
+    </div>
+    <div id="zone-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5);">
+        <div style="background-color: #fff; margin: 15% auto; padding: 20px; border: 1px solid #888; width: 80%;">
+            <h2 id="zone-modal-title"></h2>
+            <form id="zone-form">
+                <input type="hidden" id="zone-id" name="zone-id">
+                <label for="zone-name">Name:</label>
+                <input type="text" id="zone-name" name="zone-name" required>
+                <button type="submit">Save</button>
+                <button type="button" onclick="hideZoneModal()">Cancel</button>
             </form>
         </div>
     </div>
@@ -277,19 +289,47 @@
         }
 
         function showAddZoneModal() {
-            // ...
+            document.getElementById('zone-modal-title').textContent = 'Add Zone';
+            document.getElementById('zone-form').reset();
+            document.getElementById('zone-modal').style.display = 'block';
         }
 
         function showEditZoneModal(zoneName) {
-            // ...
+            document.getElementById('zone-modal-title').textContent = 'Edit Zone';
+            document.getElementById('zone-id').value = zoneName;
+            document.getElementById('zone-name').value = zoneName;
+            document.getElementById('zone-modal').style.display = 'block';
+        }
+
+        function hideZoneModal() {
+            document.getElementById('zone-modal').style.display = 'none';
         }
 
         function deleteZone(zoneName) {
-            // ...
+            if (confirm('Are you sure you want to delete this zone?')) {
+                fetch(`/zones`, {
+                    method: 'DELETE',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ name: zoneName }),
+                })
+                .then(response => {
+                    if (response.ok) {
+                        fetchZones();
+                    } else {
+                        alert('Failed to delete zone.');
+                    }
+                })
+                .catch(error => {
+                    console.error('Error deleting zone:', error);
+                    alert('An error occurred while deleting the zone.');
+                });
+            }
         }
 
         function exportZone(zoneName) {
-            // ...
+            window.location.href = `/zones/export?zone=${zoneName}`;
         }
 
         function showZoneRecords(zoneName) {
@@ -502,6 +542,42 @@
             .catch(error => {
                 console.error('Error saving configuration:', error);
                 alert('An error occurred while saving the configuration.');
+            });
+        });
+
+        document.getElementById('zone-form').addEventListener('submit', function(event) {
+            event.preventDefault();
+            const formData = new FormData(this);
+            const zoneId = formData.get('zone-id');
+            const zoneName = formData.get('zone-name');
+
+            let url = '/zones';
+            let method = 'POST';
+            let body = { name: zoneName };
+
+            if (zoneId) {
+                method = 'PUT';
+                body = { oldName: zoneId, newName: zoneName };
+            }
+
+            fetch(url, {
+                method: method,
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(body),
+            })
+            .then(response => {
+                if (response.ok) {
+                    hideZoneModal();
+                    fetchZones();
+                } else {
+                    alert('Failed to save zone.');
+                }
+            })
+            .catch(error => {
+                console.error('Error saving zone:', error);
+                alert('An error occurred while saving the zone.');
             });
         });
     </script>
