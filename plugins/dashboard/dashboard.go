@@ -21,7 +21,6 @@ type DashboardPlugin struct {
 	cfg         *config.Config
 	metrics     *metrics.Metrics
 	authPlugin  *authoritative.AuthoritativePlugin
-	zones       map[string][]dns.RR
 }
 
 func (p *DashboardPlugin) Name() string {
@@ -38,7 +37,6 @@ func New(cfg *config.Config, metrics *metrics.Metrics, authPlugin *authoritative
 		cfg:        cfg,
 		metrics:    metrics,
 		authPlugin: authPlugin,
-		zones:      make(map[string][]dns.RR),
 	}
 }
 
@@ -84,16 +82,6 @@ func (p *DashboardPlugin) zonesHandler(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		zoneNames := p.authPlugin.GetZoneNames()
 		json.NewEncoder(w).Encode(zoneNames)
-	case http.MethodPost:
-		var data struct {
-			Name string `json:"name"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
-			http.Error(w, "Bad request", http.StatusBadRequest)
-			return
-		}
-		p.zones[data.Name] = []dns.RR{}
-		w.WriteHeader(http.StatusCreated)
 	case http.MethodDelete:
 		var data struct {
 			Name string `json:"name"`
@@ -102,7 +90,10 @@ func (p *DashboardPlugin) zonesHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Bad request", http.StatusBadRequest)
 			return
 		}
-		delete(p.zones, data.Name)
+		if err := p.authPlugin.DeleteZone(data.Name); err != nil {
+			http.Error(w, "Failed to delete zone", http.StatusInternalServerError)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -142,7 +133,6 @@ func (p *DashboardPlugin) importZoneHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	p.zones[handler.Filename] = []dns.RR{}
 	log.Printf("Successfully imported zone from %s", handler.Filename)
 	w.WriteHeader(http.StatusOK)
 }
