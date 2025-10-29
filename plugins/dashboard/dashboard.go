@@ -104,11 +104,10 @@ func (p *DashboardPlugin) zonesHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Bad request", http.StatusBadRequest)
 			return
 		}
-		// UpdateZone is not implemented in authoritative plugin
-		// if err := p.authPlugin.UpdateZone(data.OldName, data.NewName); err != nil {
-		// 	http.Error(w, "Failed to update zone", http.StatusInternalServerError)
-		// 	return
-		// }
+		if err := p.authPlugin.UpdateZone(data.OldName, data.NewName); err != nil {
+			http.Error(w, "Failed to update zone: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	case http.MethodDelete:
 		var data struct {

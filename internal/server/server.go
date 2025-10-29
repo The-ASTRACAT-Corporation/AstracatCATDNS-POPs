@@ -45,8 +45,12 @@ func (s *Server) buildAndSetHandler() {
 		}
 
 		// Execute request plugins
-		pluginCtx := &plugins.PluginContext{}
+		pluginCtx := &plugins.PluginContext{ResponseWriter: w}
 		s.pluginManager.ExecutePlugins(pluginCtx, r)
+
+		if pluginCtx.Stop {
+			return
+		}
 
 		req := msgPool.Get().(*dns.Msg)
 		defer func() {

@@ -78,6 +78,7 @@ func New(filePath string) *AuthoritativePlugin {
 }
 
 func (p *AuthoritativePlugin) saveToFile() error {
+	log.Println("Attempting to save zones to file:", p.filePath)
 	p.fileMu.Lock()
 	defer p.fileMu.Unlock()
 
@@ -107,13 +108,20 @@ func (p *AuthoritativePlugin) saveToFile() error {
 
 	data, err := json.MarshalIndent(zoneDTOs, "", "  ")
 	if err != nil {
+		log.Printf("Error marshalling zones to JSON: %v", err)
 		return err
 	}
 
-	return os.WriteFile(p.filePath, data, 0644)
+	if err := os.WriteFile(p.filePath, data, 0644); err != nil {
+		log.Printf("Error writing zones to file %s: %v", p.filePath, err)
+		return err
+	}
+	log.Println("Zones successfully saved to file:", p.filePath)
+	return nil
 }
 
 func (p *AuthoritativePlugin) loadFromFile() error {
+	log.Println("Attempting to load zones from file:", p.filePath)
 	p.fileMu.Lock()
 	defer p.fileMu.Unlock()
 
@@ -123,13 +131,16 @@ func (p *AuthoritativePlugin) loadFromFile() error {
 	data, err := os.ReadFile(p.filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
+			log.Println("Zone file does not exist, starting with empty zones.")
 			return nil // File doesn't exist yet, which is fine
 		}
+		log.Printf("Error reading zone file %s: %v", p.filePath, err)
 		return err
 	}
 
 	var zoneDTOs []ZoneDTO
 	if err := json.Unmarshal(data, &zoneDTOs); err != nil {
+		log.Printf("Error unmarshalling zones from JSON: %v", err)
 		return err
 	}
 
@@ -166,7 +177,7 @@ func (p *AuthoritativePlugin) loadFromFile() error {
 		p.zones[z.Name] = z
 	}
 	p.nextRecordID = maxID + 1
-
+	log.Println("Zones successfully loaded from file:", p.filePath)
 	return nil
 }
 
@@ -388,7 +399,7 @@ func (p *AuthoritativePlugin) LoadZone(zoneFile string) error {
 	p.mu.Unlock()
 
 	log.Printf("Loaded zone %s (%d owner names)", origin, len(z.records))
-	return nil
+	return p.saveToFile()
 }
 
 // detectOrigin scans the beginning of a zone file for $ORIGIN; if not found, returns an error
@@ -488,22 +499,26 @@ func (p *AuthoritativePlugin) AddZoneRecord(zoneName string, rr dns.RR) (int, er
 	if _, ok := z.records[name]; !ok {
 		z.records[name] = make(map[uint16][]Record)
 	}
+
 	p.mu.Lock()
 	id := p.nextRecordID
 	p.nextRecordID++
 	p.mu.Unlock()
+
 	z.records[name][rr.Header().Rrtype] = append(z.records[name][rr.Header().Rrtype], Record{ID: id, RR: rr})
-	// if NS or SOA update cached fields
+
+	// collect soa and ns records separately
 	switch v := rr.(type) {
-	case *dns.NS:
-		z.nsRecords = append(z.nsRecords, v)
 	case *dns.SOA:
 		z.soa = v
+	case *dns.NS:
+		z.nsRecords = append(z.nsRecords, v)
 	}
 
 	if err := p.saveToFile(); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("failed to save zone to file: %w", err)
 	}
+
 	return id, nil
 }
 
@@ -558,4 +573,51 @@ func (p *AuthoritativePlugin) DeleteZoneRecord(zoneName string, recordId int) er
 		}
 	}
 	return fmt.Errorf("record not found")
+}
+
+func (p *AuthoritativePlugin) UpdateZone(oldZoneName, newZoneName string) error {
+	oldZn := dns.Fqdn(strings.ToLower(oldZoneName))
+	newZn := dns.Fqdn(strings.ToLower(newZoneName))
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	z, ok := p.zones[oldZn]
+	if !ok {
+		return fmt.Errorf("zone not found: %s", oldZoneName)
+	}
+
+	// Check if the new zone name already exists
+	if _, ok := p.zones[newZn]; ok {
+		return fmt.Errorf("zone with new name already exists: %s", newZoneName)
+	}
+
+	// Update the zone name
+	z.Name = newZn
+	p.zones[newZn] = z
+	delete(p.zones, oldZn)
+
+	// Update SOA and NS records to reflect the new zone name
+	if z.soa != nil {
+		if soa, ok := z.soa.(*dns.SOA); ok {
+			soa.Hdr.Name = newZn
+		}
+	}
+	for i := range z.nsRecords {
+		if ns, ok := z.nsRecords[i].(*dns.NS); ok {
+			ns.Hdr.Name = newZn
+		}
+	}
+
+	// Update all records within the zone to reflect the new zone name
+	// This is a more complex operation as it requires iterating through all records
+	// and potentially modifying their headers if they are relative to the zone origin.
+	// For simplicity, we'll assume records are stored with their full FQDN and only update the zone's internal name.
+	// A more robust solution might involve re-parsing or re-creating records.
+
+	if err := p.saveToFile(); err != nil {
+		return fmt.Errorf("failed to save zone to file after update: %w", err)
+	}
+
+	return nil
 }
