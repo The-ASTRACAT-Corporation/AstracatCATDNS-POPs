@@ -193,23 +193,24 @@ func NewMetrics() *Metrics {
 
 // StartMetricsServer starts an HTTP server for Prometheus metrics.
 func (m *Metrics) StartMetricsServer(addr string) {
-	http.Handle("/metrics", promhttp.HandlerFor(
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.HandlerFor(
 		prometheus.DefaultGatherer,
 		promhttp.HandlerOpts{
 			EnableOpenMetrics: true,
 		},
 	))
 
-	http.HandleFunc("/dashboard", m.dashboardHandler)
+	mux.HandleFunc("/dashboard", m.dashboardHandler)
 
 	// Добавляем эндпоинт для проверки здоровья
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
 
 	log.Printf("Metrics server starting on %s", addr)
-	if err := http.ListenAndServe(addr, nil); err != nil {
+	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatalf("Failed to start metrics server: %v", err)
 	}
 }

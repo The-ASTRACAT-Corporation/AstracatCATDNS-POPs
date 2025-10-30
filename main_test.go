@@ -19,6 +19,8 @@ import (
 )
 
 func TestIntegration_ResolveA(t *testing.T) {
+	go main()
+	time.Sleep(1 * time.Second)
 	client := new(dns.Client)
 	msg := new(dns.Msg)
 	// Using cloudflare.com as it's a well-known, stable domain.
@@ -42,6 +44,8 @@ func TestIntegration_ResolveA(t *testing.T) {
 }
 
 func TestIntegration_ResolveDNSSEC(t *testing.T) {
+	go main()
+	time.Sleep(1 * time.Second)
 	client := new(dns.Client)
 	msg := new(dns.Msg)
 	// Using ripe.net as it's known to be DNSSEC-signed.
@@ -72,6 +76,8 @@ func TestIntegration_ResolveDNSSEC(t *testing.T) {
 }
 
 func BenchmarkResolve(b *testing.B) {
+	go main()
+	time.Sleep(1 * time.Second)
 	client := new(dns.Client)
 	msg := new(dns.Msg)
 	msg.SetQuestion("example.com.", dns.TypeA)
@@ -95,6 +101,8 @@ func TestApiZoneSynchronization(t *testing.T) {
 	masterCfg.ServerRole = "master"
 	masterCfg.SlaveAPIKey = "test-slave-key"
 	masterZonesFile := "test_master_zones.json"
+	// Ensure a clean state before the test
+	os.Remove(masterZonesFile)
 	defer os.Remove(masterZonesFile)
 
 	masterAuthPlugin := authoritative.New(masterZonesFile)

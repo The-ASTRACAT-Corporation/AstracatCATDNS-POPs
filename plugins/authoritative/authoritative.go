@@ -24,6 +24,7 @@ import (
 
 	"dns-resolver/internal/plugins"
 	"github.com/miekg/dns"
+	"net/http"
 )
 
 // Record wraps a dns.RR with an internal ID and keeps original TTL
@@ -60,11 +61,12 @@ type ZoneDTO struct {
 
 // AuthoritativePlugin is thread-safe and intended for production use
 type AuthoritativePlugin struct {
-	zones        map[string]*Zone // key: FQDN zone name
-	nextRecordID int
-	mu           sync.RWMutex // protects zones map and nextRecordID
-	filePath     string
-	fileMu       sync.Mutex
+	zones          map[string]*Zone // key: FQDN zone name
+	nextRecordID   int
+	mu             sync.RWMutex // protects zones map and nextRecordID
+	filePath       string
+	fileMu         sync.Mutex
+	slaveEndpoints []string
 }
 
 func New(filePath string) *AuthoritativePlugin {
@@ -422,7 +424,11 @@ func (p *AuthoritativePlugin) LoadZone(zoneFile string) error {
 	p.mu.Unlock()
 
 	log.Printf("Loaded zone %s (%d owner names)", origin, len(z.records))
-	return p.saveToFile(p.GetZoneDTOs())
+	err = p.saveToFile(p.GetZoneDTOs())
+	if err == nil {
+		p.NotifySlavesOfChange()
+	}
+	return err
 }
 
 // detectOrigin scans the beginning of a zone file for $ORIGIN; if not found, returns an error
@@ -549,6 +555,9 @@ func (p *AuthoritativePlugin) AddZone(zoneName string) error {
 	p.mu.Unlock()
 	err = p.saveToFile(p.GetZoneDTOs())
 	p.mu.Lock() // Re-acquire lock for the defer to work correctly
+	if err == nil {
+		p.NotifySlavesOfChange()
+	}
 
 	return err
 }
@@ -562,7 +571,11 @@ func (p *AuthoritativePlugin) DeleteZone(zoneName string) error {
 	}
 	delete(p.zones, zn)
 	p.mu.Unlock()
-	return p.saveToFile(p.GetZoneDTOs())
+	err := p.saveToFile(p.GetZoneDTOs())
+	if err == nil {
+		p.NotifySlavesOfChange()
+	}
+	return err
 }
 
 // AddZoneRecord inserts RR into an existing zone. RR owner name is used as key.
@@ -597,10 +610,11 @@ func (p *AuthoritativePlugin) AddZoneRecord(zoneName string, rr dns.RR) (int, er
 	}
 	z.mu.Unlock()
 
-	if err := p.saveToFile(p.GetZoneDTOs()); err != nil {
+	err := p.saveToFile(p.GetZoneDTOs())
+	if err != nil {
 		return 0, fmt.Errorf("failed to save zone to file: %w", err)
 	}
-
+	p.NotifySlavesOfChange()
 	return id, nil
 }
 
@@ -654,7 +668,11 @@ func (p *AuthoritativePlugin) UpdateZoneRecord(zoneName string, recordId int, ne
 		return fmt.Errorf("record not found")
 	}
 
-	return p.saveToFile(p.GetZoneDTOs())
+	err := p.saveToFile(p.GetZoneDTOs())
+	if err == nil {
+		p.NotifySlavesOfChange()
+	}
+	return err
 }
 
 func (p *AuthoritativePlugin) DeleteZoneRecord(zoneName string, recordId int) error {
@@ -699,7 +717,11 @@ func (p *AuthoritativePlugin) DeleteZoneRecord(zoneName string, recordId int) er
 		return fmt.Errorf("record not found")
 	}
 
-	return p.saveToFile(p.GetZoneDTOs())
+	err := p.saveToFile(p.GetZoneDTOs())
+	if err == nil {
+		p.NotifySlavesOfChange()
+	}
+	return err
 }
 
 func (p *AuthoritativePlugin) UpdateZone(oldZoneName, newZoneName string) error {
@@ -744,14 +766,46 @@ func (p *AuthoritativePlugin) UpdateZone(oldZoneName, newZoneName string) error 
 	// For simplicity, we'll assume records are stored with their full FQDN and only update the zone's internal name.
 	// A more robust solution might involve re-parsing or re-creating records.
 
-	if err := p.saveToFile(p.GetZoneDTOs()); err != nil {
+	err := p.saveToFile(p.GetZoneDTOs())
+	if err != nil {
 		return fmt.Errorf("failed to save zone to file after update: %w", err)
 	}
-
+	p.NotifySlavesOfChange()
 	return nil
 }
 
 // NotifyZoneSlaves sends a DNS NOTIFY message to all slave servers listed in the zone's NS records.
+func (p *AuthoritativePlugin) SetSlaveEndpoints(endpoints []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.slaveEndpoints = endpoints
+}
+
+func (p *AuthoritativePlugin) NotifySlavesOfChange() {
+	p.mu.RLock()
+	endpoints := p.slaveEndpoints
+	p.mu.RUnlock()
+
+	if len(endpoints) == 0 {
+		return
+	}
+
+	log.Println("Notifying slaves of change...")
+	for _, endpoint := range endpoints {
+		go func(url string) {
+			resp, err := http.Post(url, "application/json", nil)
+			if err != nil {
+				log.Printf("Failed to notify slave at %s: %v", url, err)
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				log.Printf("Slave at %s returned non-OK status: %s", url, resp.Status)
+			}
+		}(endpoint)
+	}
+}
+
 func (p *AuthoritativePlugin) ReplaceAllZones(zoneDTOs []ZoneDTO) error {
 	log.Println("Replacing all zones...")
 	newZones := make(map[string]*Zone)
@@ -791,7 +845,8 @@ func (p *AuthoritativePlugin) ReplaceAllZones(zoneDTOs []ZoneDTO) error {
 	p.mu.Unlock()
 
 	log.Println("Zones successfully replaced")
-	return p.saveToFile(p.GetZoneDTOs())
+	err := p.saveToFile(p.GetZoneDTOs())
+	return err
 }
 
 func (p *AuthoritativePlugin) NotifyZoneSlaves(zoneName string) error {
