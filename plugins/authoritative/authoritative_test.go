@@ -1,11 +1,12 @@
 package authoritative
 
 import (
+	"io"
 	"io/ioutil"
 	"net"
 	"os"
+	"sync"
 	"testing"
-	"time"
 
 	"github.com/miekg/dns"
 	"github.com/stretchr/testify/assert"
@@ -15,25 +16,57 @@ import (
 // completeMockResponseWriter is a mock that implements the full dns.ResponseWriter interface
 // to prevent panics in tests that use dns.Transfer.
 type completeMockResponseWriter struct {
+	conn        net.Conn
 	writtenMsgs []*dns.Msg
 }
 
 func (m *completeMockResponseWriter) LocalAddr() net.Addr {
+	if m.conn != nil {
+		return m.conn.LocalAddr()
+	}
 	return &net.IPAddr{IP: net.ParseIP("127.0.0.1")}
 }
 func (m *completeMockResponseWriter) RemoteAddr() net.Addr {
+	if m.conn != nil {
+		return m.conn.RemoteAddr()
+	}
 	return &net.IPAddr{IP: net.ParseIP("127.0.0.1")}
 }
 func (m *completeMockResponseWriter) WriteMsg(msg *dns.Msg) error {
 	m.writtenMsgs = append(m.writtenMsgs, msg)
+	if m.conn != nil {
+		out, err := msg.Pack()
+		if err != nil {
+			return err
+		}
+		// Write the 2-byte length prefix
+		lenBuf := []byte{byte(len(out) >> 8), byte(len(out))}
+		if _, err := m.conn.Write(lenBuf); err != nil {
+			return err
+		}
+		// Write the actual message
+		if _, err := m.conn.Write(out); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 func (m *completeMockResponseWriter) Write(b []byte) (int, error) {
-	// This is typically called by dns.Transfer for the raw message bytes.
-	// We don't need to parse it back, as WriteMsg will be called with the structured data.
+	// This is the raw write, used by dns.Transfer.Out.
+	// For AXFR over TCP, each message is prefixed with its length.
+	if m.conn != nil {
+		lenBuf := []byte{byte(len(b) >> 8), byte(len(b))}
+		if _, err := m.conn.Write(lenBuf); err != nil {
+			return 0, err
+		}
+		return m.conn.Write(b)
+	}
 	return len(b), nil
 }
 func (m *completeMockResponseWriter) Close() error {
+	if m.conn != nil {
+		return m.conn.Close()
+	}
 	return nil
 }
 func (m *completeMockResponseWriter) TsigStatus() error {
@@ -69,58 +102,81 @@ func TestAXFR(t *testing.T) {
 	p := New("") // In-memory plugin, no persistence
 	p.AddZone("example.com.")
 
-	// AXFR requires a SOA record to define the zone's properties.
 	soaRR, err := dns.NewRR("example.com. 3600 IN SOA ns1.example.com. admin.example.com. 2023010101 7200 3600 1209600 3600")
 	assert.NoError(t, err)
-	_, err = p.AddZoneRecord("example.com.", soaRR)
-	assert.NoError(t, err)
-
-	// Add a few other records to ensure they are transferred.
+	p.AddZoneRecord("example.com.", soaRR)
 	aRR, err := dns.NewRR("www.example.com. 300 IN A 1.2.3.4")
 	assert.NoError(t, err)
-	_, err = p.AddZoneRecord("example.com.", aRR)
-	assert.NoError(t, err)
-
+	p.AddZoneRecord("example.com.", aRR)
 	mxRR, err := dns.NewRR("example.com. 600 IN MX 10 mail.example.com.")
 	assert.NoError(t, err)
-	_, err = p.AddZoneRecord("example.com.", mxRR)
-	assert.NoError(t, err)
+	p.AddZoneRecord("example.com.", mxRR)
 
 	zone, ok := p.findZone("example.com.")
 	assert.True(t, ok, "Failed to find the test zone")
 
-	// Setup for handling the AXFR request.
-	w := &completeMockResponseWriter{}
+	// Use net.Pipe to create an in-memory full-duplex network connection.
+	clientConn, serverConn := net.Pipe()
+
+	w := &completeMockResponseWriter{conn: serverConn}
 	req := &dns.Msg{}
 	req.SetQuestion("example.com.", dns.TypeAXFR)
 	ctx := &plugins.PluginContext{ResponseWriter: w}
 
-	// Execute the handler.
-	// We need to run this in a goroutine because the Out() call is blocking,
-	// and the test needs to proceed to check the results.
-	go p.handleAXFR(ctx, req, zone)
+	var receivedRecords []dns.RR
+	var wg sync.WaitGroup
+	wg.Add(2)
 
-	// Allow some time for the goroutine to execute.
-	// This is a common pattern in testing concurrent code.
-	time.Sleep(100 * time.Millisecond)
+	// Goroutine for the server side (our plugin)
+	go func() {
+		defer wg.Done()
+		defer serverConn.Close()
+		p.handleAXFR(ctx, req, zone)
+	}()
 
+	// Goroutine for the client side (our verification)
+	go func() {
+		defer wg.Done()
+		defer clientConn.Close()
+
+		for {
+			lenBuf := make([]byte, 2)
+			_, err := io.ReadFull(clientConn, lenBuf)
+			if err == io.EOF {
+				break // Connection closed by server
+			}
+			assert.NoError(t, err, "Client failed to read message length")
+
+			msgLen := int(lenBuf[0])<<8 | int(lenBuf[1])
+			msgBuf := make([]byte, msgLen)
+			_, err = io.ReadFull(clientConn, msgBuf)
+			assert.NoError(t, err, "Client failed to read message body")
+
+			msg := &dns.Msg{}
+			err = msg.Unpack(msgBuf)
+			assert.NoError(t, err, "Client failed to unpack message")
+
+			// For AXFR, each message contains records in the Answer section
+			receivedRecords = append(receivedRecords, msg.Answer...)
+		}
+	}()
+
+	wg.Wait()
 
 	// --- Verification ---
-	var allRecords []dns.RR
-	for _, msg := range w.writtenMsgs {
-		allRecords = append(allRecords, msg.Answer...)
+	assert.Equal(t, 4, len(receivedRecords), "Expected 4 records in total (SOA, A, MX, SOA)")
+	if len(receivedRecords) < 4 {
+		t.FailNow()
 	}
 
-	assert.GreaterOrEqual(t, len(allRecords), 3, "Expected at least 3 records for a minimal AXFR")
-
-	_, isSOAFrist := allRecords[0].(*dns.SOA)
+	_, isSOAFrist := receivedRecords[0].(*dns.SOA)
 	assert.True(t, isSOAFrist, "The first record of an AXFR transfer must be a SOA record")
 
-	_, isSOALast := allRecords[len(allRecords)-1].(*dns.SOA)
+	_, isSOALast := receivedRecords[3].(*dns.SOA)
 	assert.True(t, isSOALast, "The last record of an AXFR transfer must be a SOA record")
 
 	var foundA, foundMX bool
-	for _, rr := range allRecords[1 : len(allRecords)-1] {
+	for _, rr := range receivedRecords[1:3] {
 		switch rr.Header().Rrtype {
 		case dns.TypeA:
 			foundA = true
