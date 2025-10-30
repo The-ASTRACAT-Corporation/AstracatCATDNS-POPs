@@ -19,8 +19,6 @@ import (
 )
 
 func TestIntegration_ResolveA(t *testing.T) {
-	go main()
-	time.Sleep(1 * time.Second)
 	client := new(dns.Client)
 	msg := new(dns.Msg)
 	// Using cloudflare.com as it's a well-known, stable domain.
