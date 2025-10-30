@@ -2,23 +2,45 @@ package authoritative
 
 import (
 	"io/ioutil"
+	"net"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 	"github.com/stretchr/testify/assert"
 	"dns-resolver/internal/plugins"
 )
 
-type mockResponseWriter struct {
-	dns.ResponseWriter
+// completeMockResponseWriter is a mock that implements the full dns.ResponseWriter interface
+// to prevent panics in tests that use dns.Transfer.
+type completeMockResponseWriter struct {
 	writtenMsgs []*dns.Msg
 }
 
-func (m *mockResponseWriter) WriteMsg(msg *dns.Msg) error {
+func (m *completeMockResponseWriter) LocalAddr() net.Addr {
+	return &net.IPAddr{IP: net.ParseIP("127.0.0.1")}
+}
+func (m *completeMockResponseWriter) RemoteAddr() net.Addr {
+	return &net.IPAddr{IP: net.ParseIP("127.0.0.1")}
+}
+func (m *completeMockResponseWriter) WriteMsg(msg *dns.Msg) error {
 	m.writtenMsgs = append(m.writtenMsgs, msg)
 	return nil
 }
+func (m *completeMockResponseWriter) Write(b []byte) (int, error) {
+	// This is typically called by dns.Transfer for the raw message bytes.
+	// We don't need to parse it back, as WriteMsg will be called with the structured data.
+	return len(b), nil
+}
+func (m *completeMockResponseWriter) Close() error {
+	return nil
+}
+func (m *completeMockResponseWriter) TsigStatus() error {
+	return nil
+}
+func (m *completeMockResponseWriter) TsigTimersOnly(b bool) {}
+func (m *completeMockResponseWriter) Hijack()               {}
 
 func TestPersistence(t *testing.T) {
 	tmpfile, err := ioutil.TempFile("", "test-zones.json")
@@ -44,42 +66,70 @@ func TestPersistence(t *testing.T) {
 }
 
 func TestAXFR(t *testing.T) {
-	p := New("") // No file needed for this test
-
-	// Add a zone and some records
+	p := New("") // In-memory plugin, no persistence
 	p.AddZone("example.com.")
-	rr1, _ := dns.NewRR("www.example.com. 300 IN A 1.2.3.4")
-	rr2, _ := dns.NewRR("mail.example.com. 300 IN A 5.6.7.8")
-	p.AddZoneRecord("example.com.", rr1)
-	p.AddZoneRecord("example.com.", rr2)
 
-	zone, _ := p.findZone("example.com.")
+	// AXFR requires a SOA record to define the zone's properties.
+	soaRR, err := dns.NewRR("example.com. 3600 IN SOA ns1.example.com. admin.example.com. 2023010101 7200 3600 1209600 3600")
+	assert.NoError(t, err)
+	_, err = p.AddZoneRecord("example.com.", soaRR)
+	assert.NoError(t, err)
 
-	// Create a mock response writer and a test message
-	w := &mockResponseWriter{}
-	msg := &dns.Msg{}
-	msg.SetQuestion("example.com.", dns.TypeAXFR)
+	// Add a few other records to ensure they are transferred.
+	aRR, err := dns.NewRR("www.example.com. 300 IN A 1.2.3.4")
+	assert.NoError(t, err)
+	_, err = p.AddZoneRecord("example.com.", aRR)
+	assert.NoError(t, err)
 
-	// Handle the AXFR request
-	p.handleAXFR(&plugins.PluginContext{ResponseWriter: w}, msg, zone)
+	mxRR, err := dns.NewRR("example.com. 600 IN MX 10 mail.example.com.")
+	assert.NoError(t, err)
+	_, err = p.AddZoneRecord("example.com.", mxRR)
+	assert.NoError(t, err)
 
-	// Check the response
-	// Note: The miekg/dns Transfer logic sends records in a single envelope.
-	// A real client would handle the stream, but for this test, we can inspect the written message.
-	// Since handleAXFR uses a channel and a goroutine via `tr.Out`, a more complex setup might be needed
-	// for a direct unit test. However, the current implementation of `handleAXFR` is synchronous enough
-	// for this test to work as it pushes to the channel directly.
+	zone, ok := p.findZone("example.com.")
+	assert.True(t, ok, "Failed to find the test zone")
 
-	// This is a simplification. The actual AXFR response is a stream of messages.
-	// The mock writer will not capture the streamed nature of the response.
-	// To properly test this, we would need a more sophisticated mock that can handle the dns.Transfer logic.
-	// For now, we will assume the `handleAXFR` function is correct if it attempts to write the records.
-	// A proper integration test with a real client would be better.
+	// Setup for handling the AXFR request.
+	w := &completeMockResponseWriter{}
+	req := &dns.Msg{}
+	req.SetQuestion("example.com.", dns.TypeAXFR)
+	ctx := &plugins.PluginContext{ResponseWriter: w}
 
-	// Due to the complexity of mocking the AXFR transfer stream, we'll keep this test simple
-	// and focus on the persistence test, which is more critical for the user's request.
-	// We will rely on the manual `dig` test in the later step to verify AXFR.
-	assert.True(t, true) // Placeholder
+	// Execute the handler.
+	// We need to run this in a goroutine because the Out() call is blocking,
+	// and the test needs to proceed to check the results.
+	go p.handleAXFR(ctx, req, zone)
+
+	// Allow some time for the goroutine to execute.
+	// This is a common pattern in testing concurrent code.
+	time.Sleep(100 * time.Millisecond)
+
+
+	// --- Verification ---
+	var allRecords []dns.RR
+	for _, msg := range w.writtenMsgs {
+		allRecords = append(allRecords, msg.Answer...)
+	}
+
+	assert.GreaterOrEqual(t, len(allRecords), 3, "Expected at least 3 records for a minimal AXFR")
+
+	_, isSOAFrist := allRecords[0].(*dns.SOA)
+	assert.True(t, isSOAFrist, "The first record of an AXFR transfer must be a SOA record")
+
+	_, isSOALast := allRecords[len(allRecords)-1].(*dns.SOA)
+	assert.True(t, isSOALast, "The last record of an AXFR transfer must be a SOA record")
+
+	var foundA, foundMX bool
+	for _, rr := range allRecords[1 : len(allRecords)-1] {
+		switch rr.Header().Rrtype {
+		case dns.TypeA:
+			foundA = true
+		case dns.TypeMX:
+			foundMX = true
+		}
+	}
+	assert.True(t, foundA, "The A record was not found in the AXFR transfer")
+	assert.True(t, foundMX, "The MX record was not found in the AXFR transfer")
 }
 
 func TestUpdateRecord(t *testing.T) {
