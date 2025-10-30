@@ -15,6 +15,7 @@ import (
 	"github.com/miekg/dns"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type DashboardPlugin struct {
@@ -188,14 +189,26 @@ func (p *DashboardPlugin) configHandler(w http.ResponseWriter, r *http.Request) 
 	switch r.Method {
 	case http.MethodGet:
 		data := struct {
-			ServerRole string `json:"server_role"`
+			ServerRole        string `json:"server_role"`
+			MasterAPIEndpoint string `json:"master_api_endpoint"`
+			MasterAPIKey      string `json:"master_api_key"`
+			SlaveAPIKey       string `json:"slave_api_key"`
+			SyncInterval      int64  `json:"sync_interval"`
 		}{
-			ServerRole: p.cfg.ServerRole,
+			ServerRole:        p.cfg.ServerRole,
+			MasterAPIEndpoint: p.cfg.MasterAPIEndpoint,
+			MasterAPIKey:      p.cfg.MasterAPIKey,
+			SlaveAPIKey:       p.cfg.SlaveAPIKey,
+			SyncInterval:      int64(p.cfg.SyncInterval.Seconds()),
 		}
 		json.NewEncoder(w).Encode(data)
 	case http.MethodPost:
 		var data struct {
-			ServerRole string `json:"server-role"`
+			ServerRole        string `json:"server-role"`
+			MasterAPIEndpoint string `json:"master-api-endpoint"`
+			MasterAPIKey      string `json:"master-api-key"`
+			SlaveAPIKey       string `json:"slave-api-key"`
+			SyncInterval      int64  `json:"sync-interval"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
@@ -204,7 +217,11 @@ func (p *DashboardPlugin) configHandler(w http.ResponseWriter, r *http.Request) 
 		}
 
 		p.cfg.ServerRole = data.ServerRole
-		log.Printf("Server role updated to: %s", p.cfg.ServerRole)
+		p.cfg.MasterAPIEndpoint = data.MasterAPIEndpoint
+		p.cfg.MasterAPIKey = data.MasterAPIKey
+		p.cfg.SlaveAPIKey = data.SlaveAPIKey
+		p.cfg.SyncInterval = time.Duration(data.SyncInterval) * time.Second
+		log.Printf("Configuration updated")
 
 		w.WriteHeader(http.StatusOK)
 	default:
