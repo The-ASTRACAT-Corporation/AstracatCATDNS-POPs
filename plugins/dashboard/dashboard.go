@@ -84,11 +84,6 @@ func (p *DashboardPlugin) Start() {
 }
 
 func (p *DashboardPlugin) apiZonesHandler(w http.ResponseWriter, r *http.Request) {
-	apiKey := r.Header.Get("X-API-Key")
-	if apiKey != p.cfg.SlaveAPIKey {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -189,32 +184,20 @@ func (p *DashboardPlugin) configHandler(w http.ResponseWriter, r *http.Request) 
 	switch r.Method {
 	case http.MethodGet:
 		data := struct {
-			ServerRole        string   `json:"server_role"`
-			MasterAPIEndpoint string   `json:"master_api_endpoint"`
-			MasterAPIKey      string   `json:"master_api_key"`
-			SlaveAPIKey       string   `json:"slave_api_key"`
-			SyncInterval      int64    `json:"sync_interval"`
-			SlaveEndpoints    []string `json:"slave_endpoints"`
-			SlaveListenAddr   string   `json:"slave_listen_addr"`
+			ServerRole        string `json:"server_role"`
+			MasterAPIEndpoint string `json:"master_api_endpoint"`
+			SyncInterval      int64  `json:"sync_interval"`
 		}{
 			ServerRole:        p.cfg.ServerRole,
 			MasterAPIEndpoint: p.cfg.MasterAPIEndpoint,
-			MasterAPIKey:      p.cfg.MasterAPIKey,
-			SlaveAPIKey:       p.cfg.SlaveAPIKey,
 			SyncInterval:      int64(p.cfg.SyncInterval.Seconds()),
-			SlaveEndpoints:    p.cfg.SlaveEndpoints,
-			SlaveListenAddr:   p.cfg.SlaveListenAddr,
 		}
 		json.NewEncoder(w).Encode(data)
 	case http.MethodPost:
 		var data struct {
-			ServerRole        string   `json:"server-role"`
-			MasterAPIEndpoint string   `json:"master-api-endpoint"`
-			MasterAPIKey      string   `json:"master-api-key"`
-			SlaveAPIKey       string   `json:"slave-api-key"`
-			SyncInterval      int64    `json:"sync-interval"`
-			SlaveEndpoints    []string `json:"slave-endpoints"`
-			SlaveListenAddr   string   `json:"slave-listen-addr"`
+			ServerRole        string `json:"server-role"`
+			MasterAPIEndpoint string `json:"master-api-endpoint"`
+			SyncInterval      int64  `json:"sync-interval"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
@@ -224,11 +207,7 @@ func (p *DashboardPlugin) configHandler(w http.ResponseWriter, r *http.Request) 
 
 		p.cfg.ServerRole = data.ServerRole
 		p.cfg.MasterAPIEndpoint = data.MasterAPIEndpoint
-		p.cfg.MasterAPIKey = data.MasterAPIKey
-		p.cfg.SlaveAPIKey = data.SlaveAPIKey
 		p.cfg.SyncInterval = time.Duration(data.SyncInterval) * time.Second
-		p.cfg.SlaveEndpoints = data.SlaveEndpoints
-		p.cfg.SlaveListenAddr = data.SlaveListenAddr
 
 		if err := p.cfg.Save("config.json"); err != nil {
 			log.Printf("Error saving configuration: %v", err)

@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -98,7 +97,6 @@ func syncWithMaster(cfg *config.Config, authPlugin *authoritative.AuthoritativeP
 			log.Printf("Error creating request: %v", err)
 			return
 		}
-		req.Header.Set("X-API-Key", cfg.MasterAPIKey)
 		resp, err := client.Do(req)
 		if err != nil {
 			log.Printf("Error fetching zones from master: %v", err)
@@ -129,27 +127,7 @@ func syncWithMaster(cfg *config.Config, authPlugin *authoritative.AuthoritativeP
 	// Set up ticker for periodic sync
 	ticker := time.NewTicker(cfg.SyncInterval)
 	defer ticker.Stop()
-	go func() {
-		for range ticker.C {
-			performSync()
-		}
-	}()
-
-	// Set up HTTP server to listen for sync triggers
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/sync/trigger", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		// Optional: Add a check for a secret header from the master to secure this endpoint
-		go performSync()
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "Sync triggered")
-	})
-
-	log.Printf("Slave listening for sync triggers on %s", cfg.SlaveListenAddr)
-	if err := http.ListenAndServe(cfg.SlaveListenAddr, mux); err != nil {
-		log.Fatalf("Failed to start slave trigger server: %v", err)
+	for range ticker.C {
+		performSync()
 	}
 }
