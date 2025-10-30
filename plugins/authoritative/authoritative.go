@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"dns-resolver/internal/plugins"
 	"github.com/miekg/dns"
@@ -510,18 +511,46 @@ func (p *AuthoritativePlugin) GetZoneRecords(zoneName string) ([]Record, error) 
 
 func (p *AuthoritativePlugin) AddZone(zoneName string) error {
 	zn := dns.Fqdn(strings.ToLower(zoneName))
+
+	// Generate a default SOA record
+	serial := uint32(time.Now().Unix())
+	soaStr := fmt.Sprintf("%s 3600 IN SOA ns1.%s hostmaster.%s %d 7200 3600 1209600 3600", zn, zn, zn, serial)
+	soaRR, err := dns.NewRR(soaStr)
+	if err != nil {
+		// This should not fail with the static format
+		return fmt.Errorf("failed to create default SOA record: %w", err)
+	}
+
 	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	if _, ok := p.zones[zn]; ok {
-		p.mu.Unlock()
 		return fmt.Errorf("zone already exists: %s", zoneName)
 	}
-	p.zones[zn] = &Zone{
+
+	z := &Zone{
 		Name:    zn,
 		records: make(map[string]map[uint16][]Record),
 	}
-	p.mu.Unlock()
 
-	return p.saveToFile(p.getZoneDTOs())
+	// Add the SOA record to the new zone
+	id := p.nextRecordID
+	p.nextRecordID++
+	name := dns.Fqdn(strings.ToLower(soaRR.Header().Name))
+	if _, ok := z.records[name]; !ok {
+		z.records[name] = make(map[uint16][]Record)
+	}
+	z.records[name][soaRR.Header().Rrtype] = append(z.records[name][soaRR.Header().Rrtype], Record{ID: id, RR: soaRR})
+	z.soa = soaRR
+
+	p.zones[zn] = z
+
+	// Release lock before saving to file
+	p.mu.Unlock()
+	err = p.saveToFile(p.getZoneDTOs())
+	p.mu.Lock() // Re-acquire lock for the defer to work correctly
+
+	return err
 }
 
 func (p *AuthoritativePlugin) DeleteZone(zoneName string) error {

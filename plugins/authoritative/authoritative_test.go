@@ -82,7 +82,7 @@ func TestPersistence(t *testing.T) {
 
 	// Create a new plugin instance and add some data
 	p1 := New(tmpfile.Name())
-	p1.AddZone("example.com.")
+	p1.AddZone("example.com.") // This now auto-creates a SOA record
 	rr, _ := dns.NewRR("www.example.com. 300 IN A 1.2.3.4")
 	p1.AddZoneRecord("example.com.", rr)
 
@@ -94,8 +94,17 @@ func TestPersistence(t *testing.T) {
 
 	records, err := p2.GetZoneRecords("example.com.")
 	assert.NoError(t, err)
-	assert.Equal(t, 1, len(records))
-	assert.Equal(t, "www.example.com.\t300\tIN\tA\t1.2.3.4", records[0].RR.String())
+	assert.Equal(t, 2, len(records)) // Expect 2 records: the auto SOA and the manual A record
+
+	// Find the A record to verify it's correct
+	var foundA bool
+	for _, r := range records {
+		if a, ok := r.RR.(*dns.A); ok {
+			assert.Equal(t, "www.example.com.\t300\tIN\tA\t1.2.3.4", a.String())
+			foundA = true
+		}
+	}
+	assert.True(t, foundA, "A record not found in persisted zone")
 }
 
 func TestAXFR(t *testing.T) {
@@ -196,7 +205,7 @@ func TestUpdateRecord(t *testing.T) {
 	p := New(tmpfile.Name())
 	p.AddZone("example.com.")
 
-	// Add two records
+	// AddZone now adds a SOA, so we expect 3 records total.
 	rr1, _ := dns.NewRR("www.example.com. 300 IN A 1.1.1.1")
 	rr2, _ := dns.NewRR("mail.example.com. 300 IN A 2.2.2.2")
 	id1, err := p.AddZoneRecord("example.com.", rr1)
@@ -207,7 +216,7 @@ func TestUpdateRecord(t *testing.T) {
 	// Verify they are there
 	records, err := p.GetZoneRecords("example.com.")
 	assert.NoError(t, err)
-	assert.Equal(t, 2, len(records), "Should have two records before update")
+	assert.Equal(t, 3, len(records), "Should have three records before update (SOA, A, A)")
 
 	// Update the first record
 	updatedRR, _ := dns.NewRR("www.example.com. 600 IN A 3.3.3.3")
@@ -218,19 +227,24 @@ func TestUpdateRecord(t *testing.T) {
 	p2 := New(tmpfile.Name())
 	recordsAfterUpdate, err := p2.GetZoneRecords("example.com.")
 	assert.NoError(t, err)
-	assert.Equal(t, 2, len(recordsAfterUpdate), "Should still have two records after update")
+	assert.Equal(t, 3, len(recordsAfterUpdate), "Should still have three records after update")
 
 	// Check that the correct record was updated and the other was not
-	var updatedFound, otherFound bool
+	var updatedFound, otherFound, soaFound bool
 	for _, r := range recordsAfterUpdate {
 		if r.ID == id1 {
 			assert.Equal(t, "www.example.com.\t600\tIN\tA\t3.3.3.3", r.RR.String())
 			updatedFound = true
-		} else {
+		} else if _, ok := r.RR.(*dns.A); ok {
 			assert.Equal(t, "mail.example.com.\t300\tIN\tA\t2.2.2.2", r.RR.String())
 			otherFound = true
+		} else if _, ok := r.RR.(*dns.SOA); ok {
+			soaFound = true
 		}
 	}
+	assert.True(t, updatedFound, "Updated record not found")
+	assert.True(t, otherFound, "Unchanged record not found")
+	assert.True(t, soaFound, "SOA record not found")
 	assert.True(t, updatedFound, "Updated record not found")
 	assert.True(t, otherFound, "Unchanged record not found")
 }
