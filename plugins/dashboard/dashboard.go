@@ -67,7 +67,7 @@ func (p *DashboardPlugin) Start() {
 	http.HandleFunc("/zones", p.withBasicAuth(p.zonesHandler))
 	http.HandleFunc("/zones/import", p.withBasicAuth(p.importZoneHandler))
 	http.HandleFunc("/zones/export", p.withBasicAuth(p.exportZoneHandler))
-	http.HandleFunc("/zones/", p.withBasicAuth(p.recordsHandler))
+	http.HandleFunc("/zones/", p.withBasicAuth(p.zoneSpecificHandler)) // Renamed for clarity
 
 	http.HandleFunc("/config", p.withBasicAuth(p.configHandler))
 
@@ -192,13 +192,40 @@ func (p *DashboardPlugin) configHandler(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
-func (p *DashboardPlugin) recordsHandler(w http.ResponseWriter, r *http.Request) {
+func (p *DashboardPlugin) zoneSpecificHandler(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/zones/"), "/")
 	if len(parts) < 1 {
 		http.Error(w, "Bad request", http.StatusBadRequest)
 		return
 	}
 	zoneName := parts[0]
+
+	// Route to the appropriate handler based on the path
+	if len(parts) > 1 && parts[1] == "notify" {
+		p.notifyHandler(w, r, zoneName)
+	} else {
+		p.recordsHandler(w, r, zoneName)
+	}
+}
+
+func (p *DashboardPlugin) notifyHandler(w http.ResponseWriter, r *http.Request, zoneName string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := p.authPlugin.NotifyZoneSlaves(zoneName); err != nil {
+		log.Printf("Failed to send NOTIFY for zone %s: %v", zoneName, err)
+		http.Error(w, "Failed to send notify: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "Successfully sent NOTIFY for zone %s", zoneName)
+}
+
+func (p *DashboardPlugin) recordsHandler(w http.ResponseWriter, r *http.Request, zoneName string) {
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/zones/"), "/")
 
 	switch r.Method {
 	case http.MethodGet:

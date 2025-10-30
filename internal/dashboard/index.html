@@ -282,6 +282,7 @@
                                 <button onclick="showEditZoneModal('${zone}')">Edit</button>
                                 <button onclick="deleteZone('${zone}')">Delete</button>
                                 <button onclick="exportZone('${zone}')">Export</button>
+                                <button onclick="notifyZone('${zone}')">Notify Slaves</button>
                             `;
                         });
                     }
@@ -331,6 +332,25 @@
 
         function exportZone(zoneName) {
             window.location.href = `/zones/export?zone=${zoneName}`;
+        }
+
+        function notifyZone(zoneName) {
+            if (confirm(`Are you sure you want to send a NOTIFY for zone ${zoneName} to all slave servers?`)) {
+                fetch(`/zones/${zoneName}/notify`, {
+                    method: 'POST',
+                })
+                .then(response => {
+                    if (response.ok) {
+                        alert(`Successfully sent NOTIFY for zone ${zoneName}`);
+                    } else {
+                        response.text().then(text => alert(`Failed to send NOTIFY: ${text}`));
+                    }
+                })
+                .catch(error => {
+                    console.error('Error sending notify:', error);
+                    alert('An error occurred while sending the NOTIFY.');
+                });
+            }
         }
 
         function showZoneRecords(zoneName) {

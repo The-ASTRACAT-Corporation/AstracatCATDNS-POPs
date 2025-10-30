@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"sort"
 	"strings"
@@ -263,8 +264,10 @@ func (p *AuthoritativePlugin) Execute(ctx *plugins.PluginContext, msg *dns.Msg) 
 	return nil
 }
 
-// handleAXFR handles zone transfers. The implementation is now safer, creating deep copies
-// of records under a read lock to prevent race conditions.
+// handleAXFR handles zone transfers. The implementation is now corrected to stream
+// records one by one, which is the proper way to handle AXFR and avoids timeouts
+// with large zones. It also creates deep copies of records under a read lock
+// to prevent race conditions.
 func (p *AuthoritativePlugin) handleAXFR(ctx *plugins.PluginContext, msg *dns.Msg, zone *Zone) {
 	log.Println("Starting AXFR for zone:", zone.Name)
 	tr := new(dns.Transfer)
@@ -295,22 +298,25 @@ func (p *AuthoritativePlugin) handleAXFR(ctx *plugins.PluginContext, msg *dns.Ms
 
 		if soa == nil {
 			log.Printf("AXFR failed: SOA record not found for zone %s", zone.Name)
-			// Sending an empty envelope to signal an error is not standard,
-			// so we just close the channel and let the transfer fail.
 			return
 		}
 
-		// Send initial SOA
-		ch <- &dns.Envelope{RR: []dns.RR{soa}}
-
-		// Send all other records
 		// Sorting is not strictly required by RFC, but it's good practice
+		// for consistency.
 		sort.Slice(records, func(i, j int) bool {
 			return records[i].Header().Name < records[j].Header().Name
 		})
-		ch <- &dns.Envelope{RR: records}
 
-		// Send final SOA
+		// The AXFR protocol starts with the SOA record.
+		ch <- &dns.Envelope{RR: []dns.RR{soa}}
+
+		// Then, it sends all other records in the zone.
+		// We send them one by one to stream the response.
+		for _, r := range records {
+			ch <- &dns.Envelope{RR: []dns.RR{r}}
+		}
+
+		// The AXFR protocol ends with the same SOA record.
 		ch <- &dns.Envelope{RR: []dns.RR{soa}}
 	}()
 
@@ -711,6 +717,97 @@ func (p *AuthoritativePlugin) UpdateZone(oldZoneName, newZoneName string) error 
 
 	if err := p.saveToFile(p.getZoneDTOs()); err != nil {
 		return fmt.Errorf("failed to save zone to file after update: %w", err)
+	}
+
+	return nil
+}
+
+// NotifyZoneSlaves sends a DNS NOTIFY message to all slave servers listed in the zone's NS records.
+func (p *AuthoritativePlugin) NotifyZoneSlaves(zoneName string) error {
+	zn := dns.Fqdn(strings.ToLower(zoneName))
+	p.mu.RLock()
+	zone, ok := p.zones[zn]
+	p.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("zone not found: %s", zoneName)
+	}
+
+	zone.mu.RLock()
+	soa, haveSOA := zone.soa.(*dns.SOA)
+	nsRecords := make([]*dns.NS, 0, len(zone.nsRecords))
+	for _, rr := range zone.nsRecords {
+		if ns, ok := rr.(*dns.NS); ok {
+			nsRecords = append(nsRecords, ns)
+		}
+	}
+	zone.mu.RUnlock()
+
+	if !haveSOA {
+		return fmt.Errorf("SOA record not found for zone %s, cannot determine master server", zoneName)
+	}
+
+	masterName := soa.Ns
+	var slaves []string
+
+	for _, ns := range nsRecords {
+		// A nameserver is considered a slave if its name is not the same as the MNAME field of the SOA.
+		if !strings.EqualFold(ns.Ns, masterName) {
+			slaves = append(slaves, ns.Ns)
+		}
+	}
+
+	if len(slaves) == 0 {
+		log.Printf("No slave servers found for zone %s to notify.", zoneName)
+		return nil
+	}
+
+	m := new(dns.Msg)
+	m.SetNotify(zone.Name)
+	client := new(dns.Client)
+
+	log.Printf("Preparing to send NOTIFY for zone %s to slaves: %v", zone.Name, slaves)
+
+	for _, slaveHost := range slaves {
+		// Attempt to find glue records within the zone first.
+		var addrs []string
+		zone.mu.RLock()
+		if recs, found := zone.records[dns.Fqdn(slaveHost)]; found {
+			if aRecs, ok := recs[dns.TypeA]; ok {
+				for _, r := range aRecs {
+					if a, isA := r.RR.(*dns.A); isA {
+						addrs = append(addrs, a.A.String())
+					}
+				}
+			}
+			if aaaaRecs, ok := recs[dns.TypeAAAA]; ok {
+				for _, r := range aaaaRecs {
+					if aaaa, isAAAA := r.RR.(*dns.AAAA); isAAAA {
+						addrs = append(addrs, aaaa.AAAA.String())
+					}
+				}
+			}
+		}
+		zone.mu.RUnlock()
+
+		// If no in-zone glue is found, use the system's resolver.
+		if len(addrs) == 0 {
+			ips, err := net.LookupIP(slaveHost)
+			if err != nil {
+				log.Printf("Error resolving IP for slave %s: %v", slaveHost, err)
+				continue
+			}
+			for _, ip := range ips {
+				addrs = append(addrs, ip.String())
+			}
+		}
+
+		for _, addr := range addrs {
+			log.Printf("Sending NOTIFY for zone %s to slave %s at %s", zone.Name, slaveHost, addr)
+			_, _, err := client.Exchange(m, net.JoinHostPort(addr, "53"))
+			if err != nil {
+				log.Printf("Failed to send NOTIFY to %s (%s): %v", slaveHost, addr, err)
+			}
+		}
 	}
 
 	return nil
