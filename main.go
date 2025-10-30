@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"log"
+	"net/http"
 	"os"
 	"time"
 
@@ -79,5 +81,47 @@ func main() {
 	// Create and start the server
 	srv := server.NewServer(cfg, m, res, pm)
 
+	if cfg.ServerRole == "slave" {
+		go syncWithMaster(cfg, authoritativePlugin)
+	}
+
 	srv.ListenAndServe()
+}
+
+func syncWithMaster(cfg *config.Config, authPlugin *authoritative.AuthoritativePlugin) {
+	ticker := time.NewTicker(cfg.SyncInterval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		log.Println("Syncing with master...")
+		client := &http.Client{Timeout: 10 * time.Second}
+		req, err := http.NewRequest("GET", cfg.MasterAPIEndpoint, nil)
+		if err != nil {
+			log.Printf("Error creating request: %v", err)
+			continue
+		}
+		req.Header.Set("X-API-Key", cfg.MasterAPIKey)
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("Error fetching zones from master: %v", err)
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("Error response from master: %s", resp.Status)
+			continue
+		}
+
+		var zoneDTOs []authoritative.ZoneDTO
+		if err := json.NewDecoder(resp.Body).Decode(&zoneDTOs); err != nil {
+			log.Printf("Error decoding zones from master: %v", err)
+			continue
+		}
+		if err := authPlugin.ReplaceAllZones(zoneDTOs); err != nil {
+			log.Printf("Error replacing zones: %v", err)
+			continue
+		}
+		log.Println("Successfully synced with master")
+	}
 }

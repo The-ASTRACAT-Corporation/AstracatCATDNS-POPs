@@ -1,35 +1,26 @@
 package main
 
 import (
-	"log"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
 
+	"dns-resolver/internal/config"
+	"dns-resolver/internal/metrics"
+	"dns-resolver/plugins/authoritative"
+	"dns-resolver/plugins/dashboard"
+
 	"github.com/miekg/dns"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-// TestMain runs the main function in a separate goroutine and then runs tests.
-// This is a simple way to write an integration test for the server.
-func TestMain(m *testing.M) {
-	// Start the server in the background
-	go func() {
-		// Suppress log output from the server during tests
-		log.SetOutput(os.NewFile(0, os.DevNull))
-		main()
-	}()
-
-	// Give the server a moment to start up
-	time.Sleep(1 * time.Second)
-
-	// Run the tests
-	exitCode := m.Run()
-
-	// Exit with the test result
-	os.Exit(exitCode)
-}
-
 func TestIntegration_ResolveA(t *testing.T) {
+	go main()
+	time.Sleep(1 * time.Second)
 	client := new(dns.Client)
 	msg := new(dns.Msg)
 	// Using cloudflare.com as it's a well-known, stable domain.
@@ -98,4 +89,80 @@ func BenchmarkResolve(b *testing.B) {
 			}
 		}
 	})
+}
+
+func TestApiZoneSynchronization(t *testing.T) {
+	// 1. Setup Master Server
+	masterCfg := config.NewConfig()
+	masterCfg.ServerRole = "master"
+	masterCfg.SlaveAPIKey = "test-slave-key"
+	masterZonesFile := "test_master_zones.json"
+	defer os.Remove(masterZonesFile)
+
+	masterAuthPlugin := authoritative.New(masterZonesFile)
+	masterDashboardPlugin := dashboard.New(masterCfg, metrics.NewMetrics(), masterAuthPlugin)
+
+	// Create a new ServeMux for the test server
+	mux := http.NewServeMux()
+	masterDashboardPlugin.RegisterHandlers(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	// 2. Add data to the master
+	zoneName := "example.com."
+	err := masterAuthPlugin.AddZone(zoneName)
+	require.NoError(t, err)
+
+	rr, err := dns.NewRR("test.example.com. 3600 IN A 1.2.3.4")
+	require.NoError(t, err)
+	_, err = masterAuthPlugin.AddZoneRecord(zoneName, rr)
+	require.NoError(t, err)
+
+	// 3. Setup Slave Server
+	slaveCfg := config.NewConfig()
+	slaveCfg.ServerRole = "slave"
+	slaveCfg.MasterAPIEndpoint = server.URL + "/api/v1/zones"
+	slaveCfg.MasterAPIKey = "test-slave-key"
+	slaveZonesFile := "test_slave_zones.json"
+	defer os.Remove(slaveZonesFile)
+
+	slaveAuthPlugin := authoritative.New(slaveZonesFile)
+
+	// 4. Trigger synchronization by simulating the slave's API call
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest("GET", slaveCfg.MasterAPIEndpoint, nil)
+	require.NoError(t, err)
+	req.Header.Set("X-API-Key", slaveCfg.MasterAPIKey)
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var zoneDTOs []authoritative.ZoneDTO
+	err = json.NewDecoder(resp.Body).Decode(&zoneDTOs)
+	require.NoError(t, err)
+
+	err = slaveAuthPlugin.ReplaceAllZones(zoneDTOs)
+	require.NoError(t, err)
+
+	// 5. Verify the slave's data
+	slaveZones := slaveAuthPlugin.GetZoneNames()
+	assert.Contains(t, slaveZones, zoneName)
+
+	slaveRecords, err := slaveAuthPlugin.GetZoneRecords(zoneName)
+	require.NoError(t, err)
+	// There should be 2 records: the default SOA and the A record we added.
+	assert.Len(t, slaveRecords, 2)
+
+	foundARecord := false
+	for _, rec := range slaveRecords {
+		if a, ok := rec.RR.(*dns.A); ok {
+			if a.A.String() == "1.2.3.4" {
+				foundARecord = true
+				break
+			}
+		}
+	}
+	assert.True(t, foundARecord, "A record 'test.example.com. A 1.2.3.4' was not found on the slave")
 }
