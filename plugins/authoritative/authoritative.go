@@ -263,61 +263,61 @@ func (p *AuthoritativePlugin) Execute(ctx *plugins.PluginContext, msg *dns.Msg) 
 	return nil
 }
 
+// handleAXFR handles zone transfers. The implementation is now safer, creating deep copies
+// of records under a read lock to prevent race conditions.
 func (p *AuthoritativePlugin) handleAXFR(ctx *plugins.PluginContext, msg *dns.Msg, zone *Zone) {
 	log.Println("Starting AXFR for zone:", zone.Name)
-	records, err := p.GetZoneRecords(zone.Name)
-	if err != nil {
-		log.Printf("Error getting zone records for AXFR: %v", err)
-		return
-	}
-
-	// Sort records to ensure SOA is first
-	sort.SliceStable(records, func(i, j int) bool {
-		_, isSOA := records[i].RR.(*dns.SOA)
-		return isSOA
-	})
-
-	ch := make(chan *dns.Envelope)
 	tr := new(dns.Transfer)
+	ch := make(chan *dns.Envelope)
 
 	go func() {
 		defer close(ch)
-		log.Println("AXFR goroutine started")
+		zone.mu.RLock()
+		defer zone.mu.RUnlock()
 
-		var soa *dns.SOA
-		if len(records) > 0 {
-			if s, ok := records[0].RR.(*dns.SOA); ok {
-				soa = s
+		var soa dns.RR
+		var records []dns.RR
+
+		// Find SOA and collect all other records
+		for _, typeMap := range zone.records {
+			for _, recordSlice := range typeMap {
+				for _, rec := range recordSlice {
+					// Deep copy each record to avoid race conditions
+					rrCopy := dns.Copy(rec.RR)
+					if rrCopy.Header().Rrtype == dns.TypeSOA {
+						soa = rrCopy
+					} else {
+						records = append(records, rrCopy)
+					}
+				}
 			}
 		}
 
 		if soa == nil {
-			log.Println("AXFR failed: SOA record not found for zone:", zone.Name)
+			log.Printf("AXFR failed: SOA record not found for zone %s", zone.Name)
+			// Sending an empty envelope to signal an error is not standard,
+			// so we just close the channel and let the transfer fail.
 			return
 		}
 
-		// Start with SOA
+		// Send initial SOA
 		ch <- &dns.Envelope{RR: []dns.RR{soa}}
-		log.Println("Sent initial SOA")
 
-		// Send all records (excluding SOA, which is handled at start/end)
-		for _, r := range records {
-			if _, isSOA := r.RR.(*dns.SOA); !isSOA {
-				ch <- &dns.Envelope{RR: []dns.RR{r.RR}}
-			}
-		}
-		log.Println("Sent all records")
+		// Send all other records
+		// Sorting is not strictly required by RFC, but it's good practice
+		sort.Slice(records, func(i, j int) bool {
+			return records[i].Header().Name < records[j].Header().Name
+		})
+		ch <- &dns.Envelope{RR: records}
 
-		// End with SOA
+		// Send final SOA
 		ch <- &dns.Envelope{RR: []dns.RR{soa}}
-		log.Println("Sent final SOA")
-		log.Println("AXFR goroutine finished")
 	}()
 
 	if err := tr.Out(ctx.ResponseWriter, msg, ch); err != nil {
-		log.Printf("AXFR transfer failed: %v", err)
+		log.Printf("AXFR transfer failed for zone %s: %v", zone.Name, err)
 	}
-	log.Println("AXFR handler finished")
+	log.Println("AXFR handler finished for zone:", zone.Name)
 }
 
 // addAuthorityAndGlue populates Authority with NS records and Additional with glue A/AAAA if present
