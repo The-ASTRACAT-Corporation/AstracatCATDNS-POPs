@@ -95,21 +95,13 @@
                 </select>
                 <div id="master-config" style="display: none;">
                     <h3>Master Configuration</h3>
-                    <label for="slave-api-key">Slave API Key:</label>
-                    <input type="text" id="slave-api-key" name="slave-api-key">
-                    <label for="slave-endpoints">Slave Endpoints (comma-separated):</label>
-                    <input type="text" id="slave-endpoints" name="slave-endpoints">
                 </div>
                 <div id="slave-config" style="display: none;">
                     <h3>Slave Configuration</h3>
                     <label for="master-api-endpoint">Master API Endpoint:</label>
                     <input type="text" id="master-api-endpoint" name="master-api-endpoint">
-                    <label for="master-api-key">Master API Key:</label>
-                    <input type="text" id="master-api-key" name="master-api-key">
                     <label for="sync-interval">Sync Interval (seconds):</label>
                     <input type="number" id="sync-interval" name="sync-interval">
-                    <label for="slave-listen-addr">Slave Listen Address:</label>
-                    <input type="text" id="slave-listen-addr" name="slave-listen-addr">
                 </div>
                 <button type="submit">Save Configuration</button>
             </form>
@@ -485,12 +477,8 @@
                 .then(data => {
                     document.getElementById('server-role-status').textContent = data.server_role;
                     document.getElementById('server-role').value = data.server_role;
-                    document.getElementById('slave-api-key').value = data.slave_api_key;
                     document.getElementById('master-api-endpoint').value = data.master_api_endpoint;
-                    document.getElementById('master-api-key').value = data.master_api_key;
                     document.getElementById('sync-interval').value = data.sync_interval;
-                    document.getElementById('slave-endpoints').value = data.slave_endpoints ? data.slave_endpoints.join(',') : '';
-                    document.getElementById('slave-listen-addr').value = data.slave_listen_addr;
                     // Trigger change event to show/hide config sections
                     document.getElementById('server-role').dispatchEvent(new Event('change'));
                 })
@@ -562,15 +550,10 @@
             const data = { 'server-role': role };
 
             if (role === 'master') {
-                data['slave-api-key'] = document.getElementById('slave-api-key').value;
-                const endpoints = document.getElementById('slave-endpoints').value;
-                data['slave-endpoints'] = endpoints ? endpoints.split(',').map(s => s.trim()) : [];
             } else if (role === 'slave') {
                 data['master-api-endpoint'] = document.getElementById('master-api-endpoint').value;
-                data['master-api-key'] = document.getElementById('master-api-key').value;
                 const syncInterval = document.getElementById('sync-interval').value;
                 data['sync-interval'] = syncInterval ? parseInt(syncInterval, 10) : 60;
-                data['slave-listen-addr'] = document.getElementById('slave-listen-addr').value;
             }
 
             fetch('/config', {

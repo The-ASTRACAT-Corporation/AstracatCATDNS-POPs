@@ -24,7 +24,6 @@ import (
 
 	"dns-resolver/internal/plugins"
 	"github.com/miekg/dns"
-	"net/http"
 )
 
 // Record wraps a dns.RR with an internal ID and keeps original TTL
@@ -61,12 +60,11 @@ type ZoneDTO struct {
 
 // AuthoritativePlugin is thread-safe and intended for production use
 type AuthoritativePlugin struct {
-	zones          map[string]*Zone // key: FQDN zone name
-	nextRecordID   int
-	mu             sync.RWMutex // protects zones map and nextRecordID
-	filePath       string
-	fileMu         sync.Mutex
-	slaveEndpoints []string
+	zones        map[string]*Zone // key: FQDN zone name
+	nextRecordID int
+	mu           sync.RWMutex // protects zones map and nextRecordID
+	filePath     string
+	fileMu       sync.Mutex
 }
 
 func New(filePath string) *AuthoritativePlugin {
@@ -425,9 +423,6 @@ func (p *AuthoritativePlugin) LoadZone(zoneFile string) error {
 
 	log.Printf("Loaded zone %s (%d owner names)", origin, len(z.records))
 	err = p.saveToFile(p.GetZoneDTOs())
-	if err == nil {
-		p.NotifySlavesOfChange()
-	}
 	return err
 }
 
@@ -555,9 +550,6 @@ func (p *AuthoritativePlugin) AddZone(zoneName string) error {
 	p.mu.Unlock()
 	err = p.saveToFile(p.GetZoneDTOs())
 	p.mu.Lock() // Re-acquire lock for the defer to work correctly
-	if err == nil {
-		p.NotifySlavesOfChange()
-	}
 
 	return err
 }
@@ -572,9 +564,6 @@ func (p *AuthoritativePlugin) DeleteZone(zoneName string) error {
 	delete(p.zones, zn)
 	p.mu.Unlock()
 	err := p.saveToFile(p.GetZoneDTOs())
-	if err == nil {
-		p.NotifySlavesOfChange()
-	}
 	return err
 }
 
@@ -614,7 +603,6 @@ func (p *AuthoritativePlugin) AddZoneRecord(zoneName string, rr dns.RR) (int, er
 	if err != nil {
 		return 0, fmt.Errorf("failed to save zone to file: %w", err)
 	}
-	p.NotifySlavesOfChange()
 	return id, nil
 }
 
@@ -669,9 +657,6 @@ func (p *AuthoritativePlugin) UpdateZoneRecord(zoneName string, recordId int, ne
 	}
 
 	err := p.saveToFile(p.GetZoneDTOs())
-	if err == nil {
-		p.NotifySlavesOfChange()
-	}
 	return err
 }
 
@@ -718,9 +703,6 @@ func (p *AuthoritativePlugin) DeleteZoneRecord(zoneName string, recordId int) er
 	}
 
 	err := p.saveToFile(p.GetZoneDTOs())
-	if err == nil {
-		p.NotifySlavesOfChange()
-	}
 	return err
 }
 
@@ -770,41 +752,9 @@ func (p *AuthoritativePlugin) UpdateZone(oldZoneName, newZoneName string) error 
 	if err != nil {
 		return fmt.Errorf("failed to save zone to file after update: %w", err)
 	}
-	p.NotifySlavesOfChange()
 	return nil
 }
 
-// NotifyZoneSlaves sends a DNS NOTIFY message to all slave servers listed in the zone's NS records.
-func (p *AuthoritativePlugin) SetSlaveEndpoints(endpoints []string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.slaveEndpoints = endpoints
-}
-
-func (p *AuthoritativePlugin) NotifySlavesOfChange() {
-	p.mu.RLock()
-	endpoints := p.slaveEndpoints
-	p.mu.RUnlock()
-
-	if len(endpoints) == 0 {
-		return
-	}
-
-	log.Println("Notifying slaves of change...")
-	for _, endpoint := range endpoints {
-		go func(url string) {
-			resp, err := http.Post(url, "application/json", nil)
-			if err != nil {
-				log.Printf("Failed to notify slave at %s: %v", url, err)
-				return
-			}
-			defer resp.Body.Close()
-			if resp.StatusCode != http.StatusOK {
-				log.Printf("Slave at %s returned non-OK status: %s", url, resp.Status)
-			}
-		}(endpoint)
-	}
-}
 
 func (p *AuthoritativePlugin) ReplaceAllZones(zoneDTOs []ZoneDTO) error {
 	log.Println("Replacing all zones...")
