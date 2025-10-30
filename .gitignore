@@ -4,3 +4,7 @@
 # Ignore compiled binaries
 dns-resolver
 astracat-dns
+
+# Ignore configuration files
+config.json
+zones.json

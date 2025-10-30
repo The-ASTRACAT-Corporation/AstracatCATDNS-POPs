@@ -552,11 +552,18 @@
 
         document.getElementById('server-config-form').addEventListener('submit', function(event) {
             event.preventDefault();
-            const formData = new FormData(this);
-            const data = {};
-            formData.forEach((value, key) => {
-                data[key] = value;
-            });
+            const role = document.getElementById('server-role').value;
+            const data = { 'server-role': role };
+
+            if (role === 'master') {
+                data['slave-api-key'] = document.getElementById('slave-api-key').value;
+            } else if (role === 'slave') {
+                data['master-api-endpoint'] = document.getElementById('master-api-endpoint').value;
+                data['master-api-key'] = document.getElementById('master-api-key').value;
+                const syncInterval = document.getElementById('sync-interval').value;
+                data['sync-interval'] = syncInterval ? parseInt(syncInterval, 10) : 60;
+            }
+
             fetch('/config', {
                 method: 'POST',
                 headers: {

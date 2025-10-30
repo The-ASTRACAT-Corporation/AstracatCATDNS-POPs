@@ -221,7 +221,13 @@ func (p *DashboardPlugin) configHandler(w http.ResponseWriter, r *http.Request) 
 		p.cfg.MasterAPIKey = data.MasterAPIKey
 		p.cfg.SlaveAPIKey = data.SlaveAPIKey
 		p.cfg.SyncInterval = time.Duration(data.SyncInterval) * time.Second
-		log.Printf("Configuration updated")
+
+		if err := p.cfg.Save("config.json"); err != nil {
+			log.Printf("Error saving configuration: %v", err)
+			http.Error(w, "Failed to save configuration", http.StatusInternalServerError)
+			return
+		}
+		log.Printf("Configuration updated and saved")
 
 		w.WriteHeader(http.StatusOK)
 	default:
