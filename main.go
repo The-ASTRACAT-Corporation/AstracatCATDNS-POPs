@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -89,39 +90,66 @@ func main() {
 }
 
 func syncWithMaster(cfg *config.Config, authPlugin *authoritative.AuthoritativePlugin) {
-	ticker := time.NewTicker(cfg.SyncInterval)
-	defer ticker.Stop()
-
-	for range ticker.C {
+	performSync := func() {
 		log.Println("Syncing with master...")
 		client := &http.Client{Timeout: 10 * time.Second}
 		req, err := http.NewRequest("GET", cfg.MasterAPIEndpoint, nil)
 		if err != nil {
 			log.Printf("Error creating request: %v", err)
-			continue
+			return
 		}
 		req.Header.Set("X-API-Key", cfg.MasterAPIKey)
 		resp, err := client.Do(req)
 		if err != nil {
 			log.Printf("Error fetching zones from master: %v", err)
-			continue
+			return
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
 			log.Printf("Error response from master: %s", resp.Status)
-			continue
+			return
 		}
 
 		var zoneDTOs []authoritative.ZoneDTO
 		if err := json.NewDecoder(resp.Body).Decode(&zoneDTOs); err != nil {
 			log.Printf("Error decoding zones from master: %v", err)
-			continue
+			return
 		}
 		if err := authPlugin.ReplaceAllZones(zoneDTOs); err != nil {
 			log.Printf("Error replacing zones: %v", err)
-			continue
+			return
 		}
 		log.Println("Successfully synced with master")
+	}
+
+	// Initial sync on startup
+	go performSync()
+
+	// Set up ticker for periodic sync
+	ticker := time.NewTicker(cfg.SyncInterval)
+	defer ticker.Stop()
+	go func() {
+		for range ticker.C {
+			performSync()
+		}
+	}()
+
+	// Set up HTTP server to listen for sync triggers
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/sync/trigger", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		// Optional: Add a check for a secret header from the master to secure this endpoint
+		go performSync()
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "Sync triggered")
+	})
+
+	log.Printf("Slave listening for sync triggers on %s", cfg.SlaveListenAddr)
+	if err := http.ListenAndServe(cfg.SlaveListenAddr, mux); err != nil {
+		log.Fatalf("Failed to start slave trigger server: %v", err)
 	}
 }

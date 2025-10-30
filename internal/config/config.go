@@ -28,6 +28,8 @@ type Config struct {
 	MasterAPIKey         string
 	SlaveAPIKey          string
 	SyncInterval         time.Duration
+	SlaveEndpoints       []string
+	SlaveListenAddr      string
 }
 
 // NewConfig loads the configuration from config.json or returns a default config.
@@ -56,6 +58,8 @@ func NewConfig() *Config {
 			MasterAPIKey:         "master-key",
 			SlaveAPIKey:          "slave-key",
 			SyncInterval:         1 * time.Minute,
+			SlaveEndpoints:       []string{},
+			SlaveListenAddr:      "0.0.0.0:8081",
 		}
 		defaultCfg.Save("config.json")
 		return defaultCfg
