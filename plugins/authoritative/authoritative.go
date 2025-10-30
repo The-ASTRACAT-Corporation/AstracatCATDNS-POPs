@@ -77,34 +77,13 @@ func New(filePath string) *AuthoritativePlugin {
 	return p
 }
 
-func (p *AuthoritativePlugin) saveToFile() error {
+func (p *AuthoritativePlugin) saveToFile(zoneDTOs []ZoneDTO) error {
+	if p.filePath == "" {
+		return nil // No persistence for in-memory tests
+	}
 	log.Println("Attempting to save zones to file:", p.filePath)
 	p.fileMu.Lock()
 	defer p.fileMu.Unlock()
-
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	var zoneDTOs []ZoneDTO
-	for _, zone := range p.zones {
-		var recordDTOs []RecordDTO
-		zone.mu.RLock()
-		for _, typeMap := range zone.records {
-			for _, records := range typeMap {
-				for _, record := range records {
-					recordDTOs = append(recordDTOs, RecordDTO{
-						ID:   record.ID,
-						Data: record.RR.String(),
-					})
-				}
-			}
-		}
-		zone.mu.RUnlock()
-		zoneDTOs = append(zoneDTOs, ZoneDTO{
-			Name:    zone.Name,
-			Records: recordDTOs,
-		})
-	}
 
 	data, err := json.MarshalIndent(zoneDTOs, "", "  ")
 	if err != nil {
@@ -285,23 +264,60 @@ func (p *AuthoritativePlugin) Execute(ctx *plugins.PluginContext, msg *dns.Msg) 
 }
 
 func (p *AuthoritativePlugin) handleAXFR(ctx *plugins.PluginContext, msg *dns.Msg, zone *Zone) {
+	log.Println("Starting AXFR for zone:", zone.Name)
 	records, err := p.GetZoneRecords(zone.Name)
 	if err != nil {
 		log.Printf("Error getting zone records for AXFR: %v", err)
 		return
 	}
 
+	// Sort records to ensure SOA is first
+	sort.SliceStable(records, func(i, j int) bool {
+		_, isSOA := records[i].RR.(*dns.SOA)
+		return isSOA
+	})
+
 	ch := make(chan *dns.Envelope)
 	tr := new(dns.Transfer)
-	tr.Out(ctx.ResponseWriter, msg, ch)
 
-	var rrs []dns.RR
-	for _, r := range records {
-		rrs = append(rrs, r.RR)
+	go func() {
+		defer close(ch)
+		log.Println("AXFR goroutine started")
+
+		var soa *dns.SOA
+		if len(records) > 0 {
+			if s, ok := records[0].RR.(*dns.SOA); ok {
+				soa = s
+			}
+		}
+
+		if soa == nil {
+			log.Println("AXFR failed: SOA record not found for zone:", zone.Name)
+			return
+		}
+
+		// Start with SOA
+		ch <- &dns.Envelope{RR: []dns.RR{soa}}
+		log.Println("Sent initial SOA")
+
+		// Send all records (excluding SOA, which is handled at start/end)
+		for _, r := range records {
+			if _, isSOA := r.RR.(*dns.SOA); !isSOA {
+				ch <- &dns.Envelope{RR: []dns.RR{r.RR}}
+			}
+		}
+		log.Println("Sent all records")
+
+		// End with SOA
+		ch <- &dns.Envelope{RR: []dns.RR{soa}}
+		log.Println("Sent final SOA")
+		log.Println("AXFR goroutine finished")
+	}()
+
+	if err := tr.Out(ctx.ResponseWriter, msg, ch); err != nil {
+		log.Printf("AXFR transfer failed: %v", err)
 	}
-
-	ch <- &dns.Envelope{RR: rrs}
-	close(ch)
+	log.Println("AXFR handler finished")
 }
 
 // addAuthorityAndGlue populates Authority with NS records and Additional with glue A/AAAA if present
@@ -399,7 +415,7 @@ func (p *AuthoritativePlugin) LoadZone(zoneFile string) error {
 	p.mu.Unlock()
 
 	log.Printf("Loaded zone %s (%d owner names)", origin, len(z.records))
-	return p.saveToFile()
+	return p.saveToFile(p.getZoneDTOs())
 }
 
 // detectOrigin scans the beginning of a zone file for $ORIGIN; if not found, returns an error
@@ -423,6 +439,34 @@ func detectOrigin(r io.Reader) (string, error) {
 		return "", err
 	}
 	return "", errors.New("$ORIGIN not found in zone file")
+}
+
+// getZoneDTOs creates a deep copy of the zones for safe serialization
+func (p *AuthoritativePlugin) getZoneDTOs() []ZoneDTO {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	zoneDTOs := make([]ZoneDTO, 0, len(p.zones))
+	for _, zone := range p.zones {
+		var recordDTOs []RecordDTO
+		zone.mu.RLock()
+		for _, typeMap := range zone.records {
+			for _, records := range typeMap {
+				for _, record := range records {
+					recordDTOs = append(recordDTOs, RecordDTO{
+						ID:   record.ID,
+						Data: record.RR.String(),
+					})
+				}
+			}
+		}
+		zone.mu.RUnlock()
+		zoneDTOs = append(zoneDTOs, ZoneDTO{
+			Name:    zone.Name,
+			Records: recordDTOs,
+		})
+	}
+	return zoneDTOs
 }
 
 // CRUD helpers — concurrency safe
@@ -461,26 +505,29 @@ func (p *AuthoritativePlugin) GetZoneRecords(zoneName string) ([]Record, error) 
 func (p *AuthoritativePlugin) AddZone(zoneName string) error {
 	zn := dns.Fqdn(strings.ToLower(zoneName))
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if _, ok := p.zones[zn]; ok {
+		p.mu.Unlock()
 		return fmt.Errorf("zone already exists: %s", zoneName)
 	}
 	p.zones[zn] = &Zone{
 		Name:    zn,
 		records: make(map[string]map[uint16][]Record),
 	}
-	return p.saveToFile()
+	p.mu.Unlock()
+
+	return p.saveToFile(p.getZoneDTOs())
 }
 
 func (p *AuthoritativePlugin) DeleteZone(zoneName string) error {
 	zn := dns.Fqdn(strings.ToLower(zoneName))
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if _, ok := p.zones[zn]; !ok {
+		p.mu.Unlock()
 		return fmt.Errorf("zone not found: %s", zoneName)
 	}
 	delete(p.zones, zn)
-	return p.saveToFile()
+	p.mu.Unlock()
+	return p.saveToFile(p.getZoneDTOs())
 }
 
 // AddZoneRecord inserts RR into an existing zone. RR owner name is used as key.
@@ -495,7 +542,6 @@ func (p *AuthoritativePlugin) AddZoneRecord(zoneName string, rr dns.RR) (int, er
 
 	name := dns.Fqdn(strings.ToLower(rr.Header().Name))
 	z.mu.Lock()
-	defer z.mu.Unlock()
 	if _, ok := z.records[name]; !ok {
 		z.records[name] = make(map[uint16][]Record)
 	}
@@ -514,8 +560,9 @@ func (p *AuthoritativePlugin) AddZoneRecord(zoneName string, rr dns.RR) (int, er
 	case *dns.NS:
 		z.nsRecords = append(z.nsRecords, v)
 	}
+	z.mu.Unlock()
 
-	if err := p.saveToFile(); err != nil {
+	if err := p.saveToFile(p.getZoneDTOs()); err != nil {
 		return 0, fmt.Errorf("failed to save zone to file: %w", err)
 	}
 
@@ -524,6 +571,7 @@ func (p *AuthoritativePlugin) AddZoneRecord(zoneName string, rr dns.RR) (int, er
 
 func (p *AuthoritativePlugin) UpdateZoneRecord(zoneName string, recordId int, newRR dns.RR) error {
 	zn := dns.Fqdn(strings.ToLower(zoneName))
+	var recordUpdated bool
 	p.mu.RLock()
 	z, ok := p.zones[zn]
 	p.mu.RUnlock()
@@ -531,29 +579,52 @@ func (p *AuthoritativePlugin) UpdateZoneRecord(zoneName string, recordId int, ne
 		return fmt.Errorf("zone not found: %s", zoneName)
 	}
 	z.mu.Lock()
-	defer z.mu.Unlock()
 	for name, typmap := range z.records {
 		for t, arr := range typmap {
 			for i, r := range arr {
 				if r.ID == recordId {
+					oldRR := z.records[name][t][i].RR
 					z.records[name][t][i].RR = newRR
+					recordUpdated = true
 					// update special fields
 					switch v := newRR.(type) {
 					case *dns.NS:
+						// remove old ns record
+						if oldNS, ok := oldRR.(*dns.NS); ok {
+							for j, ns := range z.nsRecords {
+								if ns.(*dns.NS).Ns == oldNS.Ns {
+									z.nsRecords = append(z.nsRecords[:j], z.nsRecords[j+1:]...)
+									break
+								}
+							}
+						}
 						z.nsRecords = append(z.nsRecords, v)
 					case *dns.SOA:
 						z.soa = v
 					}
-					return p.saveToFile()
+					break // break inner loop
 				}
 			}
+			if recordUpdated {
+				break // break middle loop
+			}
+		}
+		if recordUpdated {
+			break // break outer loop
 		}
 	}
-	return fmt.Errorf("record not found")
+	z.mu.Unlock()
+
+	if !recordUpdated {
+		return fmt.Errorf("record not found")
+	}
+
+	return p.saveToFile(p.getZoneDTOs())
 }
 
 func (p *AuthoritativePlugin) DeleteZoneRecord(zoneName string, recordId int) error {
 	zn := dns.Fqdn(strings.ToLower(zoneName))
+	var recordDeleted bool
 	p.mu.RLock()
 	z, ok := p.zones[zn]
 	p.mu.RUnlock()
@@ -561,18 +632,39 @@ func (p *AuthoritativePlugin) DeleteZoneRecord(zoneName string, recordId int) er
 		return fmt.Errorf("zone not found: %s", zoneName)
 	}
 	z.mu.Lock()
-	defer z.mu.Unlock()
 	for name, typmap := range z.records {
 		for t, arr := range typmap {
 			for i, r := range arr {
 				if r.ID == recordId {
+					// If it's an NS record, remove it from the special slice too
+					if nsRecord, ok := r.RR.(*dns.NS); ok {
+						for j, ns := range z.nsRecords {
+							if ns.(*dns.NS).Ns == nsRecord.Ns {
+								z.nsRecords = append(z.nsRecords[:j], z.nsRecords[j+1:]...)
+								break
+							}
+						}
+					}
 					z.records[name][t] = append(arr[:i], arr[i+1:]...)
-					return p.saveToFile()
+					recordDeleted = true
+					break // break inner loop
 				}
 			}
+			if recordDeleted {
+				break // break middle loop
+			}
+		}
+		if recordDeleted {
+			break // break outer loop
 		}
 	}
-	return fmt.Errorf("record not found")
+	z.mu.Unlock()
+
+	if !recordDeleted {
+		return fmt.Errorf("record not found")
+	}
+
+	return p.saveToFile(p.getZoneDTOs())
 }
 
 func (p *AuthoritativePlugin) UpdateZone(oldZoneName, newZoneName string) error {
@@ -580,15 +672,16 @@ func (p *AuthoritativePlugin) UpdateZone(oldZoneName, newZoneName string) error 
 	newZn := dns.Fqdn(strings.ToLower(newZoneName))
 
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	z, ok := p.zones[oldZn]
 	if !ok {
+		p.mu.Unlock()
 		return fmt.Errorf("zone not found: %s", oldZoneName)
 	}
 
 	// Check if the new zone name already exists
 	if _, ok := p.zones[newZn]; ok {
+		p.mu.Unlock()
 		return fmt.Errorf("zone with new name already exists: %s", newZoneName)
 	}
 
@@ -608,6 +701,7 @@ func (p *AuthoritativePlugin) UpdateZone(oldZoneName, newZoneName string) error 
 			ns.Hdr.Name = newZn
 		}
 	}
+	p.mu.Unlock()
 
 	// Update all records within the zone to reflect the new zone name
 	// This is a more complex operation as it requires iterating through all records
@@ -615,7 +709,7 @@ func (p *AuthoritativePlugin) UpdateZone(oldZoneName, newZoneName string) error 
 	// For simplicity, we'll assume records are stored with their full FQDN and only update the zone's internal name.
 	// A more robust solution might involve re-parsing or re-creating records.
 
-	if err := p.saveToFile(); err != nil {
+	if err := p.saveToFile(p.getZoneDTOs()); err != nil {
 		return fmt.Errorf("failed to save zone to file after update: %w", err)
 	}
 

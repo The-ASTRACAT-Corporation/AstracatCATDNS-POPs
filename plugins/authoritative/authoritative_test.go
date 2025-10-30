@@ -81,3 +81,87 @@ func TestAXFR(t *testing.T) {
 	// We will rely on the manual `dig` test in the later step to verify AXFR.
 	assert.True(t, true) // Placeholder
 }
+
+func TestUpdateRecord(t *testing.T) {
+	tmpfile, err := ioutil.TempFile("", "test-zones-update.json")
+	assert.NoError(t, err)
+	defer os.Remove(tmpfile.Name())
+
+	p := New(tmpfile.Name())
+	p.AddZone("example.com.")
+
+	// Add two records
+	rr1, _ := dns.NewRR("www.example.com. 300 IN A 1.1.1.1")
+	rr2, _ := dns.NewRR("mail.example.com. 300 IN A 2.2.2.2")
+	id1, err := p.AddZoneRecord("example.com.", rr1)
+	assert.NoError(t, err)
+	_, err = p.AddZoneRecord("example.com.", rr2)
+	assert.NoError(t, err)
+
+	// Verify they are there
+	records, err := p.GetZoneRecords("example.com.")
+	assert.NoError(t, err)
+	assert.Equal(t, 2, len(records), "Should have two records before update")
+
+	// Update the first record
+	updatedRR, _ := dns.NewRR("www.example.com. 600 IN A 3.3.3.3")
+	err = p.UpdateZoneRecord("example.com.", id1, updatedRR)
+	assert.NoError(t, err)
+
+	// Verify the update from a new instance (to check persistence)
+	p2 := New(tmpfile.Name())
+	recordsAfterUpdate, err := p2.GetZoneRecords("example.com.")
+	assert.NoError(t, err)
+	assert.Equal(t, 2, len(recordsAfterUpdate), "Should still have two records after update")
+
+	// Check that the correct record was updated and the other was not
+	var updatedFound, otherFound bool
+	for _, r := range recordsAfterUpdate {
+		if r.ID == id1 {
+			assert.Equal(t, "www.example.com.\t600\tIN\tA\t3.3.3.3", r.RR.String())
+			updatedFound = true
+		} else {
+			assert.Equal(t, "mail.example.com.\t300\tIN\tA\t2.2.2.2", r.RR.String())
+			otherFound = true
+		}
+	}
+	assert.True(t, updatedFound, "Updated record not found")
+	assert.True(t, otherFound, "Unchanged record not found")
+}
+
+func TestUpdateNSRecord(t *testing.T) {
+	p := New("") // No file needed for this test
+
+	p.AddZone("example.com.")
+
+	// Add two NS records
+	ns1, _ := dns.NewRR("example.com. 3600 IN NS ns1.example.com.")
+	ns2, _ := dns.NewRR("example.com. 3600 IN NS ns2.example.com.")
+	id1, _ := p.AddZoneRecord("example.com.", ns1)
+	id2, _ := p.AddZoneRecord("example.com.", ns2)
+
+	zone, _ := p.findZone("example.com.")
+	assert.Equal(t, 2, len(zone.nsRecords), "Should have two NS records")
+
+	// Update one NS record
+	newNS, _ := dns.NewRR("example.com. 3600 IN NS new-ns.example.com.")
+	p.UpdateZoneRecord("example.com.", id1, newNS)
+
+	assert.Equal(t, 2, len(zone.nsRecords), "Should still have two NS records after update")
+	var foundNew, foundOld bool
+	for _, ns := range zone.nsRecords {
+		if ns.(*dns.NS).Ns == "new-ns.example.com." {
+			foundNew = true
+		}
+		if ns.(*dns.NS).Ns == "ns2.example.com." {
+			foundOld = true
+		}
+	}
+	assert.True(t, foundNew, "New NS record not found")
+	assert.True(t, foundOld, "Unchanged NS record not found")
+
+	// Delete the other NS record
+	p.DeleteZoneRecord("example.com.", id2)
+	assert.Equal(t, 1, len(zone.nsRecords), "Should have one NS record after delete")
+	assert.Equal(t, "new-ns.example.com.", zone.nsRecords[0].(*dns.NS).Ns)
+}
