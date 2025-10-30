@@ -95,13 +95,17 @@
                 </select>
                 <div id="master-config" style="display: none;">
                     <h3>Master Configuration</h3>
-                    <label for="slave-ips">Slave IPs:</label>
-                    <input type="text" id="slave-ips" name="slave-ips" placeholder="e.g., 192.168.1.10, 192.168.1.11">
+                    <label for="slave-api-key">Slave API Key:</label>
+                    <input type="text" id="slave-api-key" name="slave-api-key">
                 </div>
                 <div id="slave-config" style="display: none;">
                     <h3>Slave Configuration</h3>
-                    <label for="master-ip">Master IP:</label>
-                    <input type="text" id="master-ip" name="master-ip" placeholder="e.g., 192.168.1.1">
+                    <label for="master-api-endpoint">Master API Endpoint:</label>
+                    <input type="text" id="master-api-endpoint" name="master-api-endpoint">
+                    <label for="master-api-key">Master API Key:</label>
+                    <input type="text" id="master-api-key" name="master-api-key">
+                    <label for="sync-interval">Sync Interval (seconds):</label>
+                    <input type="number" id="sync-interval" name="sync-interval">
                 </div>
                 <button type="submit">Save Configuration</button>
             </form>
@@ -477,6 +481,12 @@
                 .then(data => {
                     document.getElementById('server-role-status').textContent = data.server_role;
                     document.getElementById('server-role').value = data.server_role;
+                    document.getElementById('slave-api-key').value = data.slave_api_key;
+                    document.getElementById('master-api-endpoint').value = data.master_api_endpoint;
+                    document.getElementById('master-api-key').value = data.master_api_key;
+                    document.getElementById('sync-interval').value = data.sync_interval;
+                    // Trigger change event to show/hide config sections
+                    document.getElementById('server-role').dispatchEvent(new Event('change'));
                 })
                 .catch(error => console.error('Error fetching server role:', error));
         }

@@ -20,6 +20,10 @@ type Config struct {
 	LMDBPath             string
 	ResolverType         string // "unbound" or "knot"
 	ServerRole           string // "master", "slave", or "standalone"
+	MasterAPIEndpoint    string
+	MasterAPIKey         string
+	SlaveAPIKey          string
+	SyncInterval         time.Duration
 }
 
 // NewConfig returns a new Config with default values.
@@ -41,5 +45,9 @@ func NewConfig() *Config {
 		LMDBPath:             "/tmp/dns_cache.lmdb",
 		ResolverType:         "knot", // Default to Knot resolver
 		ServerRole:           "master",
+		MasterAPIEndpoint:    "http://localhost:8080/api/v1/zones",
+		MasterAPIKey:         "master-key",
+		SlaveAPIKey:          "slave-key",
+		SyncInterval:         1 * time.Minute,
 	}
 }

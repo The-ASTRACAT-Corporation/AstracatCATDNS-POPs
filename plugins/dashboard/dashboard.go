@@ -15,6 +15,7 @@ import (
 	"github.com/miekg/dns"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type DashboardPlugin struct {
@@ -52,29 +53,49 @@ func (p *DashboardPlugin) withBasicAuth(handler http.HandlerFunc) http.HandlerFu
 	}
 }
 
+func (p *DashboardPlugin) RegisterHandlers(mux *http.ServeMux) {
+	mux.HandleFunc("/", p.withBasicAuth(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "internal/dashboard/index.html")
+	}))
+
+	mux.HandleFunc("/metrics.json", p.withBasicAuth(p.metrics.JSONMetricsHandler))
+
+	mux.HandleFunc("/zones", p.withBasicAuth(p.zonesHandler))
+	mux.HandleFunc("/zones/import", p.withBasicAuth(p.importZoneHandler))
+	mux.HandleFunc("/zones/export", p.withBasicAuth(p.exportZoneHandler))
+	mux.HandleFunc("/zones/", p.withBasicAuth(p.zoneSpecificHandler)) // Renamed for clarity
+	mux.HandleFunc("/api/v1/zones", p.apiZonesHandler)
+
+	mux.HandleFunc("/config", p.withBasicAuth(p.configHandler))
+}
+
 func (p *DashboardPlugin) Start() {
 	if p.cfg.ServerRole != "master" {
 		log.Println("Dashboard disabled: server is not in master mode")
 		return
 	}
 
-	http.HandleFunc("/", p.withBasicAuth(func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "internal/dashboard/index.html")
-	}))
-
-	http.HandleFunc("/metrics.json", p.withBasicAuth(p.metrics.JSONMetricsHandler))
-
-	http.HandleFunc("/zones", p.withBasicAuth(p.zonesHandler))
-	http.HandleFunc("/zones/import", p.withBasicAuth(p.importZoneHandler))
-	http.HandleFunc("/zones/export", p.withBasicAuth(p.exportZoneHandler))
-	http.HandleFunc("/zones/", p.withBasicAuth(p.zoneSpecificHandler)) // Renamed for clarity
-
-	http.HandleFunc("/config", p.withBasicAuth(p.configHandler))
+	p.RegisterHandlers(http.DefaultServeMux)
 
 	log.Println("Starting dashboard server on :8080")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		log.Fatalf("Failed to start dashboard server: %v", err)
 	}
+}
+
+func (p *DashboardPlugin) apiZonesHandler(w http.ResponseWriter, r *http.Request) {
+	apiKey := r.Header.Get("X-API-Key")
+	if apiKey != p.cfg.SlaveAPIKey {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	zoneDTOs := p.authPlugin.GetZoneDTOs()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(zoneDTOs)
 }
 
 func (p *DashboardPlugin) zonesHandler(w http.ResponseWriter, r *http.Request) {
@@ -168,14 +189,26 @@ func (p *DashboardPlugin) configHandler(w http.ResponseWriter, r *http.Request) 
 	switch r.Method {
 	case http.MethodGet:
 		data := struct {
-			ServerRole string `json:"server_role"`
+			ServerRole        string `json:"server_role"`
+			MasterAPIEndpoint string `json:"master_api_endpoint"`
+			MasterAPIKey      string `json:"master_api_key"`
+			SlaveAPIKey       string `json:"slave_api_key"`
+			SyncInterval      int64  `json:"sync_interval"`
 		}{
-			ServerRole: p.cfg.ServerRole,
+			ServerRole:        p.cfg.ServerRole,
+			MasterAPIEndpoint: p.cfg.MasterAPIEndpoint,
+			MasterAPIKey:      p.cfg.MasterAPIKey,
+			SlaveAPIKey:       p.cfg.SlaveAPIKey,
+			SyncInterval:      int64(p.cfg.SyncInterval.Seconds()),
 		}
 		json.NewEncoder(w).Encode(data)
 	case http.MethodPost:
 		var data struct {
-			ServerRole string `json:"server-role"`
+			ServerRole        string `json:"server-role"`
+			MasterAPIEndpoint string `json:"master-api-endpoint"`
+			MasterAPIKey      string `json:"master-api-key"`
+			SlaveAPIKey       string `json:"slave-api-key"`
+			SyncInterval      int64  `json:"sync-interval"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
@@ -184,7 +217,11 @@ func (p *DashboardPlugin) configHandler(w http.ResponseWriter, r *http.Request) 
 		}
 
 		p.cfg.ServerRole = data.ServerRole
-		log.Printf("Server role updated to: %s", p.cfg.ServerRole)
+		p.cfg.MasterAPIEndpoint = data.MasterAPIEndpoint
+		p.cfg.MasterAPIKey = data.MasterAPIKey
+		p.cfg.SlaveAPIKey = data.SlaveAPIKey
+		p.cfg.SyncInterval = time.Duration(data.SyncInterval) * time.Second
+		log.Printf("Configuration updated")
 
 		w.WriteHeader(http.StatusOK)
 	default:

@@ -422,7 +422,7 @@ func (p *AuthoritativePlugin) LoadZone(zoneFile string) error {
 	p.mu.Unlock()
 
 	log.Printf("Loaded zone %s (%d owner names)", origin, len(z.records))
-	return p.saveToFile(p.getZoneDTOs())
+	return p.saveToFile(p.GetZoneDTOs())
 }
 
 // detectOrigin scans the beginning of a zone file for $ORIGIN; if not found, returns an error
@@ -448,8 +448,8 @@ func detectOrigin(r io.Reader) (string, error) {
 	return "", errors.New("$ORIGIN not found in zone file")
 }
 
-// getZoneDTOs creates a deep copy of the zones for safe serialization
-func (p *AuthoritativePlugin) getZoneDTOs() []ZoneDTO {
+// GetZoneDTOs creates a deep copy of the zones for safe serialization
+func (p *AuthoritativePlugin) GetZoneDTOs() []ZoneDTO {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -547,7 +547,7 @@ func (p *AuthoritativePlugin) AddZone(zoneName string) error {
 
 	// Release lock before saving to file
 	p.mu.Unlock()
-	err = p.saveToFile(p.getZoneDTOs())
+	err = p.saveToFile(p.GetZoneDTOs())
 	p.mu.Lock() // Re-acquire lock for the defer to work correctly
 
 	return err
@@ -562,7 +562,7 @@ func (p *AuthoritativePlugin) DeleteZone(zoneName string) error {
 	}
 	delete(p.zones, zn)
 	p.mu.Unlock()
-	return p.saveToFile(p.getZoneDTOs())
+	return p.saveToFile(p.GetZoneDTOs())
 }
 
 // AddZoneRecord inserts RR into an existing zone. RR owner name is used as key.
@@ -597,7 +597,7 @@ func (p *AuthoritativePlugin) AddZoneRecord(zoneName string, rr dns.RR) (int, er
 	}
 	z.mu.Unlock()
 
-	if err := p.saveToFile(p.getZoneDTOs()); err != nil {
+	if err := p.saveToFile(p.GetZoneDTOs()); err != nil {
 		return 0, fmt.Errorf("failed to save zone to file: %w", err)
 	}
 
@@ -654,7 +654,7 @@ func (p *AuthoritativePlugin) UpdateZoneRecord(zoneName string, recordId int, ne
 		return fmt.Errorf("record not found")
 	}
 
-	return p.saveToFile(p.getZoneDTOs())
+	return p.saveToFile(p.GetZoneDTOs())
 }
 
 func (p *AuthoritativePlugin) DeleteZoneRecord(zoneName string, recordId int) error {
@@ -699,7 +699,7 @@ func (p *AuthoritativePlugin) DeleteZoneRecord(zoneName string, recordId int) er
 		return fmt.Errorf("record not found")
 	}
 
-	return p.saveToFile(p.getZoneDTOs())
+	return p.saveToFile(p.GetZoneDTOs())
 }
 
 func (p *AuthoritativePlugin) UpdateZone(oldZoneName, newZoneName string) error {
@@ -744,7 +744,7 @@ func (p *AuthoritativePlugin) UpdateZone(oldZoneName, newZoneName string) error 
 	// For simplicity, we'll assume records are stored with their full FQDN and only update the zone's internal name.
 	// A more robust solution might involve re-parsing or re-creating records.
 
-	if err := p.saveToFile(p.getZoneDTOs()); err != nil {
+	if err := p.saveToFile(p.GetZoneDTOs()); err != nil {
 		return fmt.Errorf("failed to save zone to file after update: %w", err)
 	}
 
@@ -752,6 +752,48 @@ func (p *AuthoritativePlugin) UpdateZone(oldZoneName, newZoneName string) error 
 }
 
 // NotifyZoneSlaves sends a DNS NOTIFY message to all slave servers listed in the zone's NS records.
+func (p *AuthoritativePlugin) ReplaceAllZones(zoneDTOs []ZoneDTO) error {
+	log.Println("Replacing all zones...")
+	newZones := make(map[string]*Zone)
+	maxID := 0
+	for _, zd := range zoneDTOs {
+		z := &Zone{
+			Name:    zd.Name,
+			records: make(map[string]map[uint16][]Record),
+		}
+		for _, rd := range zd.Records {
+			rr, err := dns.NewRR(rd.Data)
+			if err != nil {
+				log.Printf("Error parsing record from file: %v", err)
+				continue
+			}
+			name := dns.Fqdn(strings.ToLower(rr.Header().Name))
+			if _, ok := z.records[name]; !ok {
+				z.records[name] = make(map[uint16][]Record)
+			}
+			z.records[name][rr.Header().Rrtype] = append(z.records[name][rr.Header().Rrtype], Record{ID: rd.ID, RR: rr})
+			if rd.ID > maxID {
+				maxID = rd.ID
+			}
+			switch v := rr.(type) {
+			case *dns.SOA:
+				z.soa = v
+			case *dns.NS:
+				z.nsRecords = append(z.nsRecords, v)
+			}
+		}
+		newZones[z.Name] = z
+	}
+
+	p.mu.Lock()
+	p.zones = newZones
+	p.nextRecordID = maxID + 1
+	p.mu.Unlock()
+
+	log.Println("Zones successfully replaced")
+	return p.saveToFile(p.GetZoneDTOs())
+}
+
 func (p *AuthoritativePlugin) NotifyZoneSlaves(zoneName string) error {
 	zn := dns.Fqdn(strings.ToLower(zoneName))
 	p.mu.RLock()
