@@ -240,11 +240,14 @@ func (p *AuthoritativePlugin) Execute(ctx *plugins.PluginContext, msg *dns.Msg) 
 				res.Answer = append(res.Answer, r.RR)
 			}
 		} else {
-			// If no direct match, check for CNAME.
-			// Per RFC, if a CNAME exists for a name, it should be the only record.
-			if cnameRecs, ok := recordsForName[dns.TypeCNAME]; ok {
-				for _, r := range cnameRecs {
-					res.Answer = append(res.Answer, r.RR)
+			// If no direct match, check for CNAME and follow it.
+			if cnameRecs, ok := recordsForName[dns.TypeCNAME]; ok && len(cnameRecs) > 0 {
+				cnameRR := cnameRecs[0].RR
+				res.Answer = append(res.Answer, cnameRR)
+
+				if cname, isCNAME := cnameRR.(*dns.CNAME); isCNAME {
+					// Follow CNAME within authoritative zones
+					p.followCname(res, q, cname.Target, 0)
 				}
 			}
 		}
@@ -253,6 +256,8 @@ func (p *AuthoritativePlugin) Execute(ctx *plugins.PluginContext, msg *dns.Msg) 
 		if len(res.Answer) > 0 {
 			// Successful answer. Add NS records to authority and glue to additional
 			p.addAuthorityAndGlue(res, zone)
+			// Add extra records (e.g., A/AAAA for MX)
+			p.addExtraRecords(res, zone)
 			ctx.ResponseWriter.WriteMsg(res)
 			ctx.Stop = true
 			return nil
@@ -271,6 +276,45 @@ func (p *AuthoritativePlugin) Execute(ctx *plugins.PluginContext, msg *dns.Msg) 
 	ctx.ResponseWriter.WriteMsg(res)
 	ctx.Stop = true
 	return nil
+}
+
+const maxCnameFollows = 5
+
+func (p *AuthoritativePlugin) followCname(res *dns.Msg, q dns.Question, name string, depth int) {
+	if depth > maxCnameFollows {
+		return // Protection against CNAME loops
+	}
+
+	targetZone, ok := p.findZone(name)
+	if !ok {
+		return // Target is not in an authoritative zone for this server
+	}
+
+	targetName := dns.Fqdn(strings.ToLower(name))
+	targetZone.mu.RLock()
+	defer targetZone.mu.RUnlock()
+
+	recordsForTarget, nameExists := targetZone.records[targetName]
+	if !nameExists {
+		return
+	}
+
+	// Check for the originally requested type.
+	if recs, ok := recordsForTarget[q.Qtype]; ok {
+		for _, r := range recs {
+			res.Answer = append(res.Answer, r.RR)
+		}
+		return // Found the final answer
+	}
+
+	// If the direct type is not found, check if the target is another CNAME.
+	if cnameRecs, ok := recordsForTarget[dns.TypeCNAME]; ok && len(cnameRecs) > 0 {
+		cnameRR := cnameRecs[0].RR
+		res.Answer = append(res.Answer, cnameRR)
+		if cname, isCNAME := cnameRR.(*dns.CNAME); isCNAME {
+			p.followCname(res, q, cname.Target, depth+1)
+		}
+	}
 }
 
 // handleAXFR handles zone transfers. The implementation is now corrected to stream
@@ -358,6 +402,34 @@ func (p *AuthoritativePlugin) addAuthorityAndGlue(res *dns.Msg, z *Zone) {
 		}
 	}
 }
+
+// addExtraRecords adds A/AAAA records for MX and SRV records to the Extra section.
+func (p *AuthoritativePlugin) addExtraRecords(res *dns.Msg, z *Zone) {
+	z.mu.RLock()
+	defer z.mu.RUnlock()
+
+	for _, rr := range res.Answer {
+		var target string
+		if mx, ok := rr.(*dns.MX); ok {
+			target = mx.Mx
+		} else if srv, ok := rr.(*dns.SRV); ok {
+			target = srv.Target
+		}
+
+		if target != "" {
+			owner := dns.Fqdn(strings.ToLower(target))
+			if recs, found := z.records[owner]; found {
+				for _, r := range recs[dns.TypeA] {
+					res.Extra = append(res.Extra, r.RR)
+				}
+				for _, r := range recs[dns.TypeAAAA] {
+					res.Extra = append(res.Extra, r.RR)
+				}
+			}
+		}
+	}
+}
+
 
 // addSOAAuthority sets SOA in Authority (used for NXDOMAIN and NODATA)
 func (p *AuthoritativePlugin) addSOAAuthority(res *dns.Msg, z *Zone) {

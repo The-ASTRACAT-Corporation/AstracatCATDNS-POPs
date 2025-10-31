@@ -289,6 +289,7 @@ func TestUpdateNSRecord(t *testing.T) {
 func TestCNAMEAliasResponse(t *testing.T) {
 	p := New("") // In-memory
 	p.AddZone("example.com.")
+	p.AddZone("real.com.") // CNAME target zone
 	cnameRR, err := dns.NewRR("www.example.com. 300 IN CNAME www.real.com.")
 	assert.NoError(t, err)
 	aRR, err := dns.NewRR("www.real.com. 300 IN A 1.2.3.4")
@@ -296,7 +297,8 @@ func TestCNAMEAliasResponse(t *testing.T) {
 
 	_, err = p.AddZoneRecord("example.com.", cnameRR)
 	assert.NoError(t, err)
-	_, err = p.AddZoneRecord("example.com.", aRR)
+	// Add the A record to its correct zone
+	_, err = p.AddZoneRecord("real.com.", aRR)
 	assert.NoError(t, err)
 
 	w := &completeMockResponseWriter{}
@@ -314,12 +316,61 @@ func TestCNAMEAliasResponse(t *testing.T) {
 	res := w.writtenMsgs[0]
 
 	assert.Equal(t, dns.RcodeSuccess, res.Rcode, "Rcode should be NOERROR")
-	assert.Equal(t, 1, len(res.Answer), "Answer section should contain 1 record (the CNAME)")
+	assert.Equal(t, 2, len(res.Answer), "Answer should contain CNAME and A record")
 
-	if len(res.Answer) == 1 {
+	if len(res.Answer) == 2 {
 		cname, ok := res.Answer[0].(*dns.CNAME)
-		assert.True(t, ok, "The returned record should be a CNAME")
+		assert.True(t, ok, "First record should be CNAME")
 		assert.Equal(t, "www.example.com.", cname.Hdr.Name)
 		assert.Equal(t, "www.real.com.", cname.Target)
+
+		a, ok := res.Answer[1].(*dns.A)
+		assert.True(t, ok, "Second record should be A")
+		assert.Equal(t, "www.real.com.", a.Hdr.Name)
+		assert.Equal(t, "1.2.3.4", a.A.String())
+	}
+}
+
+func TestMXRecordResponse(t *testing.T) {
+	p := New("") // In-memory
+	p.AddZone("example.com.")
+	mxRR, err := dns.NewRR("example.com. 300 IN MX 10 mail.example.com.")
+	assert.NoError(t, err)
+	aRR, err := dns.NewRR("mail.example.com. 300 IN A 1.2.3.4")
+	assert.NoError(t, err)
+
+	_, err = p.AddZoneRecord("example.com.", mxRR)
+	assert.NoError(t, err)
+	_, err = p.AddZoneRecord("example.com.", aRR)
+	assert.NoError(t, err)
+
+	w := &completeMockResponseWriter{}
+	req := &dns.Msg{}
+	req.SetQuestion("example.com.", dns.TypeMX)
+	ctx := &plugins.PluginContext{ResponseWriter: w}
+
+	// Execute the plugin logic
+	err = p.Execute(ctx, req)
+	assert.NoError(t, err)
+
+	// --- Verification ---
+	assert.True(t, ctx.Stop, "Handler should have stopped the chain")
+	assert.Equal(t, 1, len(w.writtenMsgs), "Expected exactly one message to be written")
+	res := w.writtenMsgs[0]
+
+	assert.Equal(t, dns.RcodeSuccess, res.Rcode, "Rcode should be NOERROR")
+	assert.Equal(t, 1, len(res.Answer), "Answer section should contain 1 record (the MX record)")
+	assert.Equal(t, 1, len(res.Extra), "Extra section should contain 1 record (the A record for the mail server)")
+
+	if len(res.Answer) == 1 && len(res.Extra) == 1 {
+		mx, ok := res.Answer[0].(*dns.MX)
+		assert.True(t, ok, "The returned record should be an MX")
+		assert.Equal(t, "example.com.", mx.Hdr.Name)
+		assert.Equal(t, "mail.example.com.", mx.Mx)
+
+		a, ok := res.Extra[0].(*dns.A)
+		assert.True(t, ok, "The extra record should be an A")
+		assert.Equal(t, "mail.example.com.", a.Hdr.Name)
+		assert.Equal(t, "1.2.3.4", a.A.String())
 	}
 }
