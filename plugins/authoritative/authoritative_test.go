@@ -285,3 +285,41 @@ func TestUpdateNSRecord(t *testing.T) {
 	assert.Equal(t, 1, len(zone.nsRecords), "Should have one NS record after delete")
 	assert.Equal(t, "new-ns.example.com.", zone.nsRecords[0].(*dns.NS).Ns)
 }
+
+func TestCNAMEAliasResponse(t *testing.T) {
+	p := New("") // In-memory
+	p.AddZone("example.com.")
+	cnameRR, err := dns.NewRR("www.example.com. 300 IN CNAME www.real.com.")
+	assert.NoError(t, err)
+	aRR, err := dns.NewRR("www.real.com. 300 IN A 1.2.3.4")
+	assert.NoError(t, err)
+
+	_, err = p.AddZoneRecord("example.com.", cnameRR)
+	assert.NoError(t, err)
+	_, err = p.AddZoneRecord("example.com.", aRR)
+	assert.NoError(t, err)
+
+	w := &completeMockResponseWriter{}
+	req := &dns.Msg{}
+	req.SetQuestion("www.example.com.", dns.TypeA)
+	ctx := &plugins.PluginContext{ResponseWriter: w}
+
+	// Execute the plugin logic
+	err = p.Execute(ctx, req)
+	assert.NoError(t, err)
+
+	// --- Verification ---
+	assert.True(t, ctx.Stop, "Handler should have stopped the chain")
+	assert.Equal(t, 1, len(w.writtenMsgs), "Expected exactly one message to be written")
+	res := w.writtenMsgs[0]
+
+	assert.Equal(t, dns.RcodeSuccess, res.Rcode, "Rcode should be NOERROR")
+	assert.Equal(t, 1, len(res.Answer), "Answer section should contain 1 record (the CNAME)")
+
+	if len(res.Answer) == 1 {
+		cname, ok := res.Answer[0].(*dns.CNAME)
+		assert.True(t, ok, "The returned record should be a CNAME")
+		assert.Equal(t, "www.example.com.", cname.Hdr.Name)
+		assert.Equal(t, "www.real.com.", cname.Target)
+	}
+}
