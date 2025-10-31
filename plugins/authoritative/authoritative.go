@@ -239,6 +239,14 @@ func (p *AuthoritativePlugin) Execute(ctx *plugins.PluginContext, msg *dns.Msg) 
 			for _, r := range recs {
 				res.Answer = append(res.Answer, r.RR)
 			}
+		} else {
+			// If no direct match, check for CNAME.
+			// Per RFC, if a CNAME exists for a name, it should be the only record.
+			if cnameRecs, ok := recordsForName[dns.TypeCNAME]; ok {
+				for _, r := range cnameRecs {
+					res.Answer = append(res.Answer, r.RR)
+				}
+			}
 		}
 		zone.mu.RUnlock()
 
