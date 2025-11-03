@@ -97,6 +97,7 @@ func (f *FixedSizeCacheItem) Unpack(data []byte) error {
 
 // CacheItem represents an item in the cache.
 type CacheItem struct {
+	Msg                  *dns.Msg
 	MsgBytes             []byte
 	Question             dns.Question
 	Expiration           time.Time
@@ -125,6 +126,7 @@ type Cache struct {
 	lmdbEnv       *lmdb.Env
 	lmdbDBI       lmdb.DBI
 	metrics       *metrics.Metrics
+	msgPool       sync.Pool
 }
 
 // NewCache creates and returns a new Cache with LMDB persistence.
@@ -190,6 +192,11 @@ func NewCache(size int, numShards int, lmdbPath string, m *metrics.Metrics) *Cac
 		lmdbEnv:       env,
 		lmdbDBI:       dbi,
 		metrics:       m,
+		msgPool: sync.Pool{
+			New: func() interface{} {
+				return new(dns.Msg)
+			},
+		},
 	}
 
 	c.loadFromDB()
@@ -234,15 +241,16 @@ func (c *Cache) loadFromDB() {
 				continue
 			}
 
-			msg := new(dns.Msg)
+			msg := c.msgPool.Get().(*dns.Msg)
 			if err := msg.Unpack(fItem.MsgBytes); err != nil {
+				c.msgPool.Put(msg)
 				c.metrics.IncrementLMDBErrors()
 				log.Printf("Failed to unpack DNS message for key %s: %v", string(key), err)
 				continue
 			}
 
 			c.metrics.IncrementLMDBCacheLoads()
-			evictedKey := c.setInMemory(string(key), fItem.MsgBytes, msg.Question[0],
+			evictedKey := c.setInMemory(string(key), fItem.MsgBytes, msg,
 				time.Duration(fItem.StaleWhileRevalidateNanoseconds),
 				expiration)
 			if evictedKey != "" {
@@ -307,26 +315,14 @@ func (c *Cache) Get(key string) (*dns.Msg, bool, bool) {
 		return nil, false, false
 	}
 
-	msg := new(dns.Msg)
-	if err := msg.Unpack(item.MsgBytes); err != nil {
-		log.Printf("Failed to unpack message from in-memory cache for key %s: %v", key, err)
-		// Consider removing the corrupted item
-		evictedKey := shard.removeItem(item)
-		if evictedKey != "" {
-			c.metrics.IncrementCacheEvictions()
-			c.deleteFromDB(evictedKey)
-		}
-		c.metrics.IncrementCacheMisses()
-		return nil, false, false
-	}
-
 	if time.Now().After(item.Expiration) {
 		if item.StaleWhileRevalidate > 0 && time.Now().Before(item.Expiration.Add(item.StaleWhileRevalidate)) {
 			c.metrics.IncrementCacheHits()
-			msg.Id = 0
-			return msg, true, true
+			// Return a deep copy to prevent race conditions
+			msgCopy := item.Msg.Copy()
+			return msgCopy, true, true
 		}
-		evictedKey := shard.removeItem(item)
+		evictedKey := shard.removeItem(item, &c.msgPool)
 		if evictedKey != "" {
 			c.metrics.IncrementCacheEvictions()
 			c.deleteFromDB(evictedKey)
@@ -335,15 +331,16 @@ func (c *Cache) Get(key string) (*dns.Msg, bool, bool) {
 		return nil, false, false
 	}
 
-	evictedKey := shard.accessItem(item)
+	evictedKey := shard.accessItem(item, &c.msgPool)
 	if evictedKey != "" {
 		c.metrics.IncrementCacheEvictions()
 		c.deleteFromDB(evictedKey)
 	}
 
 	c.metrics.IncrementCacheHits()
-	msg.Id = 0
-	return msg, true, false
+	// Return a deep copy to prevent race conditions
+	msgCopy := item.Msg.Copy()
+	return msgCopy, true, false
 }
 
 func (c *Cache) Set(key string, msg *dns.Msg, swr time.Duration) {
@@ -354,35 +351,36 @@ func (c *Cache) Set(key string, msg *dns.Msg, swr time.Duration) {
 	ttl := getMinTTL(msg)
 	expiration := time.Now().Add(time.Duration(ttl) * time.Second)
 
-	c.writeToDB(key, msg, expiration, swr)
-
 	packedMsg, err := msg.Pack()
 	if err != nil {
-		log.Printf("Failed to pack DNS message for in-memory cache, key %s: %v", key, err)
+		log.Printf("Failed to pack DNS message for key %s: %v", key, err)
 		return
 	}
 
-	evictedKey := c.setInMemory(key, packedMsg, msg.Question[0], swr, expiration)
+	c.writeToDB(key, msg, expiration, swr)
+
+	evictedKey := c.setInMemory(key, packedMsg, msg, swr, expiration)
 	if evictedKey != "" && evictedKey != key {
 		c.metrics.IncrementCacheEvictions()
 		c.deleteFromDB(evictedKey)
 	}
 }
 
-func (c *Cache) setInMemory(key string, msgBytes []byte, question dns.Question, swr time.Duration, expiration time.Time) string {
+func (c *Cache) setInMemory(key string, msgBytes []byte, msg *dns.Msg, swr time.Duration, expiration time.Time) string {
 	shard := c.getShard(key)
 	shard.Lock()
 	defer shard.Unlock()
 
 	if existingItem, found := shard.items[key]; found {
 		existingItem.MsgBytes = msgBytes
-		existingItem.Question = question
+		existingItem.Msg = msg
+		existingItem.Question = msg.Question[0]
 		existingItem.Expiration = expiration
 		existingItem.StaleWhileRevalidate = swr
 		if existingItem.element != nil {
 			if existingItem.parentList == shard.probationList {
 				shard.probationList.Remove(existingItem.element)
-				return shard.addProtected(key, existingItem)
+				return shard.addProtected(key, existingItem, &c.msgPool)
 			} else if existingItem.parentList == shard.protectedList {
 				shard.protectedList.MoveToFront(existingItem.element)
 			}
@@ -391,20 +389,24 @@ func (c *Cache) setInMemory(key string, msgBytes []byte, question dns.Question, 
 	}
 
 	item := &CacheItem{
+		Msg:                  msg,
 		MsgBytes:             msgBytes,
-		Question:             question,
+		Question:             msg.Question[0],
 		Expiration:           expiration,
 		StaleWhileRevalidate: swr,
 	}
-	return shard.addProbation(key, item)
+	return shard.addProbation(key, item, &c.msgPool)
 }
 
-func (s *slruSegment) addProbation(key string, item *CacheItem) string {
+func (s *slruSegment) addProbation(key string, item *CacheItem, pool *sync.Pool) string {
 	var evictedKey string
 	if s.probationList.Len() >= s.probationCapacity && s.probationCapacity > 0 {
 		oldest := s.probationList.Back()
 		if oldest != nil {
 			evictedKey = oldest.Value.(string)
+			if evictedItem, ok := s.items[evictedKey]; ok {
+				pool.Put(evictedItem.Msg)
+			}
 			delete(s.items, evictedKey)
 			s.probationList.Remove(oldest)
 		}
@@ -415,7 +417,7 @@ func (s *slruSegment) addProbation(key string, item *CacheItem) string {
 	return evictedKey
 }
 
-func (s *slruSegment) addProtected(key string, item *CacheItem) string {
+func (s *slruSegment) addProtected(key string, item *CacheItem, pool *sync.Pool) string {
 	var evictedKey string
 	if s.protectedList.Len() >= s.protectedCapacity && s.protectedCapacity > 0 {
 		oldest := s.protectedList.Back()
@@ -423,7 +425,7 @@ func (s *slruSegment) addProtected(key string, item *CacheItem) string {
 			keyToMove := oldest.Value.(string)
 			itemToMove := s.items[keyToMove]
 			s.protectedList.Remove(oldest)
-			evictedKey = s.addProbation(keyToMove, itemToMove)
+			evictedKey = s.addProbation(keyToMove, itemToMove, pool)
 		}
 	}
 	item.element = s.protectedList.PushFront(key)
@@ -432,21 +434,21 @@ func (s *slruSegment) addProtected(key string, item *CacheItem) string {
 	return evictedKey
 }
 
-func (s *slruSegment) accessItem(item *CacheItem) string {
+func (s *slruSegment) accessItem(item *CacheItem, pool *sync.Pool) string {
 	if item.element == nil {
 		return ""
 	}
 
 	if item.parentList == s.probationList {
 		s.probationList.Remove(item.element)
-		return s.addProtected(item.element.Value.(string), item)
+		return s.addProtected(item.element.Value.(string), item, pool)
 	} else if item.parentList == s.protectedList {
 		s.protectedList.MoveToFront(item.element)
 	}
 	return ""
 }
 
-func (s *slruSegment) removeItem(item *CacheItem) string {
+func (s *slruSegment) removeItem(item *CacheItem, pool *sync.Pool) string {
 	if item.element == nil {
 		return ""
 	}
@@ -456,6 +458,9 @@ func (s *slruSegment) removeItem(item *CacheItem) string {
 	key, ok := item.element.Value.(string)
 	if !ok {
 		return ""
+	}
+	if item, ok := s.items[key]; ok {
+		pool.Put(item.Msg)
 	}
 	delete(s.items, key)
 	return key
