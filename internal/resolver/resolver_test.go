@@ -5,7 +5,6 @@ import (
 	"dns-resolver/internal/cache"
 	"dns-resolver/internal/config"
 	"dns-resolver/internal/metrics"
-	"os"
 	"testing"
 	"time"
 
@@ -15,13 +14,11 @@ import (
 func TestResolver_Resolve(t *testing.T) {
 	// Create a new cache and resolver for the test.
 	cfg := config.NewConfig()
-	dir, err := os.MkdirTemp("", "test-resolver-lmdb")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(dir)
 	m := metrics.NewMetrics()
-	c := cache.NewCache(cache.DefaultCacheSize, cache.DefaultShards, dir, m)
+	c, err := cache.NewCache(cache.DefaultCacheSize, m)
+	if err != nil {
+		t.Fatalf("Failed to create cache: %v", err)
+	}
 	defer c.Close()
 	r, err := NewResolver(ResolverTypeUnbound, cfg, c, m)
 	if err != nil {
@@ -69,13 +66,11 @@ func TestResolver_Resolve_DNSSEC(t *testing.T) {
 	cfg := config.NewConfig()
 	// Use a longer timeout for DNSSEC queries as they can be slower.
 	cfg.RequestTimeout = 20 * time.Second
-	dir, err := os.MkdirTemp("", "test-resolver-dnssec-lmdb")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(dir)
 	m := metrics.NewMetrics()
-	c := cache.NewCache(cache.DefaultCacheSize, cache.DefaultShards, dir, m)
+	c, err := cache.NewCache(cache.DefaultCacheSize, m)
+	if err != nil {
+		t.Fatalf("Failed to create cache: %v", err)
+	}
 	defer c.Close()
 	r, err := NewResolver(ResolverTypeUnbound, cfg, c, m)
 	if err != nil {

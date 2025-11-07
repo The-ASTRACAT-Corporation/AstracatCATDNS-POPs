@@ -40,7 +40,10 @@ func main() {
 	m := metrics.NewMetrics()
 
 	// Create cache and resolver
-	c := cache.NewCache(cfg.CacheSize, cache.DefaultShards, cfg.LMDBPath, m)
+	c, err := cache.NewCache(cfg.CacheSize, m)
+	if err != nil {
+		log.Fatalf("Failed to create cache: %v", err)
+	}
 	defer c.Close()
 	
 	// Create resolver based on configuration
@@ -55,8 +58,7 @@ func main() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
-			probation, protected := c.GetCacheSize()
-			m.UpdateCacheStats(probation, protected)
+			m.UpdateCacheStats(c.GetCacheMetrics())
 		}
 	}()
 
