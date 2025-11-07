@@ -16,6 +16,7 @@ import (
 	"dns-resolver/plugins/authoritative"
 	"dns-resolver/plugins/dashboard"
 	"dns-resolver/plugins/example_logger"
+	"dns-resolver/plugins/loadbalancer"
 )
 
 // Старая функция больше не используется, так как теперь используем метод из пакета metrics
@@ -76,8 +77,12 @@ func main() {
 	authoritativePlugin := authoritative.New("zones.json")
 	pm.Register(authoritativePlugin)
 
+	// Register the load balancer plugin
+	loadBalancerPlugin := loadbalancer.New()
+	pm.Register(loadBalancerPlugin)
+
 	// Register and start the dashboard plugin
-	dashboardPlugin := dashboard.New(cfg, m, authoritativePlugin)
+	dashboardPlugin := dashboard.New(cfg, m, authoritativePlugin, loadBalancerPlugin)
 	go dashboardPlugin.Start()
 
 	// Create and start the server

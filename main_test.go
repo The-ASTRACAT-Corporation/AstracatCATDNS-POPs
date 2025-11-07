@@ -12,6 +12,7 @@ import (
 	"dns-resolver/internal/metrics"
 	"dns-resolver/plugins/authoritative"
 	"dns-resolver/plugins/dashboard"
+	"dns-resolver/plugins/loadbalancer"
 
 	"github.com/miekg/dns"
 	"github.com/stretchr/testify/assert"
@@ -105,7 +106,8 @@ func TestApiZoneSynchronization(t *testing.T) {
 	defer os.Remove(masterZonesFile)
 
 	masterAuthPlugin := authoritative.New(masterZonesFile)
-	masterDashboardPlugin := dashboard.New(masterCfg, metrics.NewMetrics(), masterAuthPlugin)
+	masterLbPlugin := loadbalancer.New()
+	masterDashboardPlugin := dashboard.New(masterCfg, metrics.NewMetrics(), masterAuthPlugin, masterLbPlugin)
 
 	// Create a new ServeMux for the test server
 	mux := http.NewServeMux()
