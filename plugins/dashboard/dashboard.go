@@ -12,6 +12,7 @@ import (
 	"dns-resolver/internal/metrics"
 	"dns-resolver/internal/plugins"
 	"dns-resolver/plugins/authoritative"
+	"dns-resolver/plugins/loadbalancer"
 	"github.com/miekg/dns"
 	"strconv"
 	"strings"
@@ -19,9 +20,10 @@ import (
 )
 
 type DashboardPlugin struct {
-	cfg         *config.Config
-	metrics     *metrics.Metrics
-	authPlugin  *authoritative.AuthoritativePlugin
+	cfg        *config.Config
+	metrics    *metrics.Metrics
+	authPlugin *authoritative.AuthoritativePlugin
+	lbPlugin   *loadbalancer.LoadBalancerPlugin
 }
 
 func (p *DashboardPlugin) Name() string {
@@ -33,11 +35,12 @@ func (p *DashboardPlugin) Execute(ctx *plugins.PluginContext, msg *dns.Msg) erro
 	return nil
 }
 
-func New(cfg *config.Config, metrics *metrics.Metrics, authPlugin *authoritative.AuthoritativePlugin) *DashboardPlugin {
+func New(cfg *config.Config, metrics *metrics.Metrics, authPlugin *authoritative.AuthoritativePlugin, lbPlugin *loadbalancer.LoadBalancerPlugin) *DashboardPlugin {
 	return &DashboardPlugin{
 		cfg:        cfg,
 		metrics:    metrics,
 		authPlugin: authPlugin,
+		lbPlugin:   lbPlugin,
 	}
 }
 
@@ -67,6 +70,9 @@ func (p *DashboardPlugin) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/zones", p.apiZonesHandler)
 
 	mux.HandleFunc("/config", p.withBasicAuth(p.configHandler))
+
+	mux.HandleFunc("/loadbalancer/pools", p.withBasicAuth(p.poolsHandler))
+	mux.HandleFunc("/loadbalancer/pools/", p.withBasicAuth(p.poolSpecificHandler))
 }
 
 func (p *DashboardPlugin) Start() {
@@ -380,5 +386,56 @@ func (p *DashboardPlugin) exportZoneHandler(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Content-Disposition", "attachment; filename="+zoneName)
 	for _, record := range records {
 		w.Write([]byte(record.RR.String() + "\n"))
+	}
+}
+
+func (p *DashboardPlugin) poolsHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		pools := p.lbPlugin.GetPools()
+		json.NewEncoder(w).Encode(pools)
+	case http.MethodPost:
+		var pool loadbalancer.Pool
+		if err := json.NewDecoder(r.Body).Decode(&pool); err != nil {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
+		p.lbPlugin.AddPool(&pool)
+		w.WriteHeader(http.StatusCreated)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (p *DashboardPlugin) poolSpecificHandler(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/loadbalancer/pools/"), "/")
+	if len(parts) < 1 {
+		http.Error(w, "Bad request", http.StatusBadRequest)
+		return
+	}
+	poolName := parts[0]
+
+	switch r.Method {
+	case http.MethodGet:
+		pool, ok := p.lbPlugin.GetPool(poolName)
+		if !ok {
+			http.Error(w, "Pool not found", http.StatusNotFound)
+			return
+		}
+		json.NewEncoder(w).Encode(pool)
+	case http.MethodPut:
+		var pool loadbalancer.Pool
+		if err := json.NewDecoder(r.Body).Decode(&pool); err != nil {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
+		p.lbPlugin.DeletePool(poolName)
+		p.lbPlugin.AddPool(&pool)
+		w.WriteHeader(http.StatusOK)
+	case http.MethodDelete:
+		p.lbPlugin.DeletePool(poolName)
+		w.WriteHeader(http.StatusOK)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }
