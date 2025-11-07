@@ -15,6 +15,7 @@ import (
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/mem"
 	"github.com/shirou/gopsutil/v3/net"
+	"github.com/dgraph-io/ristretto"
 )
 
 // LatencyStat holds the total latency and count for a domain.
@@ -356,9 +357,14 @@ func (m *Metrics) systemMetricsCollector() {
 }
 
 // UpdateCacheStats updates the cache statistics.
-func (m *Metrics) UpdateCacheStats(probation, protected int) {
-	promCacheProbation.Set(float64(probation))
-	promCacheProtected.Set(float64(protected))
+func (m *Metrics) UpdateCacheStats(ristrettoMetrics *ristretto.Metrics) {
+    if ristrettoMetrics == nil {
+        return
+    }
+    // These are counters, so we should set them to their current value.
+    promCacheHits.Add(float64(ristrettoMetrics.GetsKept()))
+    promCacheMisses.Add(float64(ristrettoMetrics.GetsDropped()))
+    promCacheEvictions.Add(float64(ristrettoMetrics.CostEvicted()))
 }
 
 // RecordNXDOMAIN records an NXDOMAIN response for a given domain.
