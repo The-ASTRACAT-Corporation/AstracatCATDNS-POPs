@@ -161,25 +161,6 @@
         </div>
     </div>
 
-    <div class="container" id="loadbalancer-management-container">
-        <div class="table-card" style="width: 90%;">
-            <h2>Load Balancer Management</h2>
-            <button onclick="showAddPoolModal()">Add Pool</button>
-            <table id="pools-table">
-                <thead>
-                    <tr>
-                        <th>Pool Name</th>
-                        <th>Policy</th>
-                        <th>Backends</th>
-                        <th>Actions</th>
-                    </tr>
-                </thead>
-                <tbody>
-                </tbody>
-            </table>
-        </div>
-    </div>
-
     <div class="container" id="zone-records-container" style="display: none;">
         <div class="table-card" style="width: 90%;">
             <h2 id="zone-records-title"></h2>
@@ -236,29 +217,6 @@
                 <input type="text" id="zone-name" name="zone-name" required>
                 <button type="submit">Save</button>
                 <button type="button" onclick="hideZoneModal()">Cancel</button>
-            </form>
-        </div>
-    </div>
-
-    <div id="pool-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5);">
-        <div style="background-color: #fff; margin: 15% auto; padding: 20px; border: 1px solid #888; width: 80%;">
-            <h2 id="pool-modal-title"></h2>
-            <form id="pool-form">
-                <input type="hidden" id="pool-id" name="pool-id">
-                <label for="pool-name">Name:</label>
-                <input type="text" id="pool-name" name="pool-name" required>
-                <label for="pool-policy">Policy:</label>
-                <select id="pool-policy" name="pool-policy">
-                    <option value="round-robin">Round Robin</option>
-                    <option value="weighted-round-robin">Weighted Round Robin</option>
-                    <option value="geoip">GeoIP</option>
-                </select>
-                <h3>Backends</h3>
-                <div id="backends-container">
-                </div>
-                <button type="button" onclick="addBackend()">Add Backend</button>
-                <button type="submit">Save</button>
-                <button type="button" onclick="hidePoolModal()">Cancel</button>
             </form>
         </div>
     </div>
@@ -653,146 +611,6 @@
                 alert('An error occurred while saving the zone.');
             });
         });
-
-        function fetchPools() {
-            fetch('/loadbalancer/pools')
-                .then(response => response.json())
-                .then(data => {
-                    const tableBody = document.getElementById('pools-table').getElementsByTagName('tbody')[0];
-                    tableBody.innerHTML = ''; // Clear existing rows
-                    if (data) {
-                        data.forEach(pool => {
-                            const row = tableBody.insertRow();
-                            const nameCell = row.insertCell(0);
-                            const policyCell = row.insertCell(1);
-                            const backendsCell = row.insertCell(2);
-                            const actionsCell = row.insertCell(3);
-
-                            nameCell.textContent = pool.name;
-                            policyCell.textContent = pool.policy;
-                            backendsCell.textContent = pool.backends.length;
-                            actionsCell.innerHTML = `
-                                <button onclick="showEditPoolModal('${pool.name}')">Edit</button>
-                                <button onclick="deletePool('${pool.name}')">Delete</button>
-                            `;
-                        });
-                    }
-                })
-                .catch(error => console.error('Error fetching pools:', error));
-        }
-
-        function showAddPoolModal() {
-            document.getElementById('pool-modal-title').textContent = 'Add Pool';
-            document.getElementById('pool-form').reset();
-            document.getElementById('backends-container').innerHTML = '';
-            document.getElementById('pool-modal').style.display = 'block';
-        }
-
-        function showEditPoolModal(poolName) {
-            fetch(`/loadbalancer/pools/${poolName}`)
-                .then(response => response.json())
-                .then(pool => {
-                    document.getElementById('pool-modal-title').textContent = 'Edit Pool';
-                    document.getElementById('pool-id').value = pool.name;
-                    document.getElementById('pool-name').value = pool.name;
-                    document.getElementById('pool-policy').value = pool.policy;
-                    const backendsContainer = document.getElementById('backends-container');
-                    backendsContainer.innerHTML = '';
-                    pool.backends.forEach(backend => {
-                        addBackend(backend.address, backend.weight, backend.country);
-                    });
-                    document.getElementById('pool-modal').style.display = 'block';
-                })
-                .catch(error => console.error('Error fetching pool:', error));
-        }
-
-        function hidePoolModal() {
-            document.getElementById('pool-modal').style.display = 'none';
-        }
-
-        function addBackend(address = '', weight = 1, country = '') {
-            const container = document.getElementById('backends-container');
-            const backendDiv = document.createElement('div');
-            backendDiv.innerHTML = `
-                <input type="text" name="backend-address" placeholder="Address" value="${address}" required>
-                <input type="number" name="backend-weight" placeholder="Weight" value="${weight}" required>
-                <input type="text" name="backend-country" placeholder="Country" value="${country}">
-                <button type="button" onclick="this.parentElement.remove()">Remove</button>
-            `;
-            container.appendChild(backendDiv);
-        }
-
-        function deletePool(poolName) {
-            if (confirm('Are you sure you want to delete this pool?')) {
-                fetch(`/loadbalancer/pools/${poolName}`, {
-                    method: 'DELETE',
-                })
-                .then(response => {
-                    if (response.ok) {
-                        fetchPools();
-                    } else {
-                        alert('Failed to delete pool.');
-                    }
-                })
-                .catch(error => {
-                    console.error('Error deleting pool:', error);
-                    alert('An error occurred while deleting the pool.');
-                });
-            }
-        }
-
-        document.getElementById('pool-form').addEventListener('submit', function(event) {
-            event.preventDefault();
-            const formData = new FormData(this);
-            const poolId = formData.get('pool-id');
-
-            const backends = [];
-            const backendAddresses = formData.getAll('backend-address');
-            const backendWeights = formData.getAll('backend-weight');
-            const backendCountries = formData.getAll('backend-country');
-            for (let i = 0; i < backendAddresses.length; i++) {
-                backends.push({
-                    address: backendAddresses[i],
-                    weight: parseInt(backendWeights[i]),
-                    country: backendCountries[i],
-                });
-            }
-
-            const data = {
-                name: formData.get('pool-name'),
-                policy: formData.get('pool-policy'),
-                backends: backends,
-            };
-
-            let url = '/loadbalancer/pools';
-            let method = 'POST';
-            if (poolId) {
-                url += `/${poolId}`;
-                method = 'PUT';
-            }
-
-            fetch(url, {
-                method: method,
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify(data),
-            })
-            .then(response => {
-                if (response.ok) {
-                    hidePoolModal();
-                    fetchPools();
-                } else {
-                    alert('Failed to save pool.');
-                }
-            })
-            .catch(error => {
-                console.error('Error saving pool:', error);
-                alert('An error occurred while saving the pool.');
-            });
-        });
-
-        fetchPools();
     </script>
 </body>
 </html>
