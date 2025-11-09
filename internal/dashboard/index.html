@@ -201,8 +201,9 @@
                 </select>
                 <label for="record-ttl">TTL:</label>
                 <input type="number" id="record-ttl" name="record-ttl" value="3600" required>
-                <label for="record-value">Value:</label>
-                <input type="text" id="record-value" name="record-value" required>
+                <div id="record-value-container">
+                    <!-- Dynamic content will be injected here by script -->
+                </div>
                 <button type="submit">Save</button>
                 <button type="button" onclick="hideRecordModal()">Cancel</button>
             </form>
@@ -418,6 +419,7 @@
             document.getElementById('modal-title').textContent = 'Add Record';
             document.getElementById('record-form').reset();
             document.getElementById('record-modal').style.display = 'block';
+            updateRecordValueFields();
         }
 
         function showEditRecordModal(zoneName, recordId) {
@@ -431,8 +433,16 @@
                         document.getElementById('record-name').value = record.name;
                         document.getElementById('record-type').value = record.type;
                         document.getElementById('record-ttl').value = record.ttl;
-                        document.getElementById('record-value').value = record.value;
                         document.getElementById('record-modal').style.display = 'block';
+                        updateRecordValueFields();
+
+                        if (record.type === 'MX') {
+                            const parts = record.value.split(' ');
+                            document.getElementById('record-priority').value = parts[0];
+                            document.getElementById('record-host').value = parts[1];
+                        } else {
+                            document.getElementById('record-value').value = record.value;
+                        }
                     }
                 })
                 .catch(error => console.error('Error fetching record:', error));
@@ -503,17 +513,48 @@
             }
         });
 
+        document.getElementById('record-type').addEventListener('change', updateRecordValueFields);
+
+        function updateRecordValueFields() {
+            const type = document.getElementById('record-type').value;
+            const container = document.getElementById('record-value-container');
+
+            if (type === 'MX') {
+                container.innerHTML = `
+                    <label for="record-priority">Priority:</label>
+                    <input type="number" id="record-priority" name="record-priority" required>
+                    <label for="record-host">Host:</label>
+                    <input type="text" id="record-host" name="record-host" required>
+                `;
+            } else {
+                container.innerHTML = `
+                    <label for="record-value">Value:</label>
+                    <input type="text" id="record-value" name="record-value" required>
+                `;
+            }
+        }
         document.getElementById('record-form').addEventListener('submit', function(event) {
             event.preventDefault();
             const formData = new FormData(this);
             const recordId = formData.get('record-id');
             const zoneName = document.getElementById('zone-records-title').textContent.replace('Managing Zone: ', '');
 
+            const recordType = formData.get('record-type');
+            let recordValue;
+
+            if (recordType === 'MX') {
+                const priority = formData.get('record-priority');
+                const host = formData.get('record-host');
+                recordValue = `${priority} ${host}`;
+            } else {
+                recordValue = formData.get('record-value');
+            }
+
             const data = {
                 name: formData.get('record-name'),
-                type: formData.get('record-type'),
+                type: recordType,
                 ttl: parseInt(formData.get('record-ttl')),
-                value: formData.get('record-value'),
+                value: recordValue,
             };
 
             let url = `/zones/${zoneName}/records`;
