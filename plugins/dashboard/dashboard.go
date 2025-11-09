@@ -268,8 +268,34 @@ func (p *DashboardPlugin) recordsHandler(w http.ResponseWriter, r *http.Request,
 		// Convert records to a JSON-friendly format
 		var jsonRecords []map[string]interface{}
 		for _, record := range records {
-			parts := strings.Fields(record.RR.String())
-			value := strings.Join(parts[4:], " ")
+			var value string
+			switch rr := record.RR.(type) {
+			case *dns.A:
+				value = rr.A.String()
+			case *dns.AAAA:
+				value = rr.AAAA.String()
+			case *dns.CNAME:
+				value = rr.Target
+			case *dns.MX:
+				value = fmt.Sprintf("%d %s", rr.Preference, rr.Mx)
+			case *dns.TXT:
+				// Join the strings from the TXT record, preserving spaces.
+				// The library stores them as a slice of strings.
+				value = strings.Join(rr.Txt, " ")
+			case *dns.NS:
+				value = rr.Ns
+			case *dns.SOA:
+				value = fmt.Sprintf("%s %s %d %d %d %d %d", rr.Ns, rr.Mbox, rr.Serial, rr.Refresh, rr.Retry, rr.Expire, rr.Minttl)
+			default:
+				// Fallback for other record types
+				parts := strings.Fields(record.RR.String())
+				if len(parts) > 4 {
+					value = strings.Join(parts[4:], " ")
+				} else {
+					value = ""
+				}
+			}
+
 			jsonRecords = append(jsonRecords, map[string]interface{}{
 				"id":    record.ID,
 				"name":  record.RR.Header().Name,
