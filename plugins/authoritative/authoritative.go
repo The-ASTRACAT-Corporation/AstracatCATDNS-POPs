@@ -52,6 +52,18 @@ type Zone struct {
 	mu sync.RWMutex
 }
 
+// syncNSRecords rebuilds the nsRecords slice from the canonical records map.
+// This ensures consistency after any CRUD operation.
+// The caller must hold a write lock on the Zone.
+func (z *Zone) syncNSRecords() {
+	z.nsRecords = nil // Clear the slice
+	for _, typeMap := range z.records {
+		if nsRecs, ok := typeMap[dns.TypeNS]; ok {
+			z.nsRecords = append(z.nsRecords, nsRecs...)
+		}
+	}
+}
+
 // ZoneDTO is a serializable representation of a Zone
 type ZoneDTO struct {
 	Name    string      `json:"name"`
@@ -695,11 +707,10 @@ func (p *AuthoritativePlugin) AddZoneRecord(zoneName string, rr dns.RR) (int, er
 	rec := Record{ID: id, RR: rr}
 	z.records[name][rr.Header().Rrtype] = append(z.records[name][rr.Header().Rrtype], rec)
 
-	switch rr.(type) {
-	case *dns.SOA:
-		z.soa = rr
-	case *dns.NS:
-		z.nsRecords = append(z.nsRecords, rec)
+	if _, ok := rr.(*dns.NS); ok {
+		z.syncNSRecords()
+	} else if soa, ok := rr.(*dns.SOA); ok {
+		z.soa = soa
 	}
 	z.mu.Unlock()
 
@@ -730,18 +741,10 @@ func (p *AuthoritativePlugin) UpdateZoneRecord(zoneName string, recordId int, ne
 					z.records[name][t][i].RR = newRR
 					recordUpdated = true
 					// update special fields
-					switch newRR.(type) {
-					case *dns.NS:
-						// remove old ns record
-						for j, rec := range z.nsRecords {
-							if rec.ID == recordId {
-								z.nsRecords = append(z.nsRecords[:j], z.nsRecords[j+1:]...)
-								break
-							}
-						}
-						z.nsRecords = append(z.nsRecords, Record{ID: recordId, RR: newRR})
-					case *dns.SOA:
-						z.soa = newRR
+					if _, ok := newRR.(*dns.NS); ok {
+						z.syncNSRecords()
+					} else if soa, ok := newRR.(*dns.SOA); ok {
+						z.soa = soa
 					}
 					break // break inner loop
 				}
@@ -781,17 +784,17 @@ func (p *AuthoritativePlugin) DeleteZoneRecord(zoneName string, recordId int) er
 		for t, arr := range typmap {
 			for i, r := range arr {
 				if r.ID == recordId {
-					// If it's an NS record, remove it from the special slice too
+					isNS := false
 					if _, ok := r.RR.(*dns.NS); ok {
-						for j, rec := range z.nsRecords {
-							if rec.ID == recordId {
-								z.nsRecords = append(z.nsRecords[:j], z.nsRecords[j+1:]...)
-								break
-							}
-						}
+						isNS = true
 					}
+
 					z.records[name][t] = append(arr[:i], arr[i+1:]...)
 					recordDeleted = true
+
+					if isNS {
+						z.syncNSRecords()
+					}
 					break // break inner loop
 				}
 			}
