@@ -269,12 +269,14 @@ func TestUpdateNSRecord(t *testing.T) {
 
 	assert.Equal(t, 2, len(zone.nsRecords), "Should still have two NS records after update")
 	var foundNew, foundOld bool
-	for _, ns := range zone.nsRecords {
-		if ns.(*dns.NS).Ns == "new-ns.example.com." {
-			foundNew = true
-		}
-		if ns.(*dns.NS).Ns == "ns2.example.com." {
-			foundOld = true
+	for _, rec := range zone.nsRecords {
+		if ns, ok := rec.RR.(*dns.NS); ok {
+			if ns.Ns == "new-ns.example.com." {
+				foundNew = true
+			}
+			if ns.Ns == "ns2.example.com." {
+				foundOld = true
+			}
 		}
 	}
 	assert.True(t, foundNew, "New NS record not found")
@@ -283,7 +285,7 @@ func TestUpdateNSRecord(t *testing.T) {
 	// Delete the other NS record
 	p.DeleteZoneRecord("example.com.", id2)
 	assert.Equal(t, 1, len(zone.nsRecords), "Should have one NS record after delete")
-	assert.Equal(t, "new-ns.example.com.", zone.nsRecords[0].(*dns.NS).Ns)
+	assert.Equal(t, "new-ns.example.com.", zone.nsRecords[0].RR.(*dns.NS).Ns)
 }
 
 func TestCNAMEAliasResponse(t *testing.T) {
@@ -402,6 +404,56 @@ func TestNSApexQuery(t *testing.T) {
 	}
 	assert.True(t, a1Found, "Glue record for ns1.example.com. not found in Extra section")
 	assert.True(t, a2Found, "Glue record for ns2.example.com. not found in Extra section")
+}
+
+func TestAddMultipleNSRecords(t *testing.T) {
+	p := New("") // In-memory
+	p.AddZone("example.com.")
+
+	// Add four NS records
+	ns1RR, err := dns.NewRR("example.com. 3600 IN NS ns1.example.com.")
+	assert.NoError(t, err)
+	ns2RR, err := dns.NewRR("example.com. 3600 IN NS ns2.example.com.")
+	assert.NoError(t, err)
+	ns3RR, err := dns.NewRR("example.com. 3600 IN NS ns3.example.com.")
+	assert.NoError(t, err)
+	ns4RR, err := dns.NewRR("example.com. 3600 IN NS ns4.example.com.")
+	assert.NoError(t, err)
+
+	_, err = p.AddZoneRecord("example.com.", ns1RR)
+	assert.NoError(t, err)
+	_, err = p.AddZoneRecord("example.com.", ns2RR)
+	assert.NoError(t, err)
+	_, err = p.AddZoneRecord("example.com.", ns3RR)
+	assert.NoError(t, err)
+	_, err = p.AddZoneRecord("example.com.", ns4RR)
+	assert.NoError(t, err)
+
+	// Verification
+	zone, ok := p.findZone("example.com.")
+	assert.True(t, ok, "Failed to find the test zone")
+	assert.Equal(t, 4, len(zone.nsRecords), "Should have four NS records")
+
+	// Check that all records are there
+	var found [4]bool
+	for _, rec := range zone.nsRecords {
+		if ns, ok := rec.RR.(*dns.NS); ok {
+			switch ns.Ns {
+			case "ns1.example.com.":
+				found[0] = true
+			case "ns2.example.com.":
+				found[1] = true
+			case "ns3.example.com.":
+				found[2] = true
+			case "ns4.example.com.":
+				found[3] = true
+			}
+		}
+	}
+	assert.True(t, found[0], "ns1.example.com. not found")
+	assert.True(t, found[1], "ns2.example.com. not found")
+	assert.True(t, found[2], "ns3.example.com. not found")
+	assert.True(t, found[3], "ns4.example.com. not found")
 }
 
 func TestMXRecordResponse(t *testing.T) {
