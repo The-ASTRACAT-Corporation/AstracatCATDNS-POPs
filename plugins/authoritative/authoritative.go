@@ -215,6 +215,26 @@ func (p *AuthoritativePlugin) Execute(ctx *plugins.PluginContext, msg *dns.Msg) 
 	res.Authoritative = true
 	res.RecursionAvailable = false
 
+	// Special handling for NS query at zone apex.
+	// This ensures that if NS records exist for the zone, they are returned
+	// in the Answer section, rather than treating it as a NODATA response.
+	if q.Qtype == dns.TypeNS && strings.EqualFold(q.Name, zone.Name) {
+		zone.mu.RLock()
+		// We use the separate nsRecords slice which is the definitive source for zone NS records.
+		for _, rr := range zone.nsRecords {
+			res.Answer = append(res.Answer, dns.Copy(rr))
+		}
+		zone.mu.RUnlock()
+
+		if len(res.Answer) > 0 {
+			p.addAuthorityAndGlue(res, zone)
+			ctx.ResponseWriter.WriteMsg(res)
+			ctx.Stop = true
+			return nil
+		}
+		// If no NS records are found, we fall through to the standard lookup logic.
+	}
+
 	// lookup
 	name := dns.Fqdn(strings.ToLower(q.Name))
 	zone.mu.RLock()

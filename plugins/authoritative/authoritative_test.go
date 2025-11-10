@@ -331,6 +331,79 @@ func TestCNAMEAliasResponse(t *testing.T) {
 	}
 }
 
+func TestNSApexQuery(t *testing.T) {
+	p := New("") // In-memory
+	p.AddZone("example.com.")
+
+	// Add NS records and their corresponding A records (glue)
+	ns1RR, err := dns.NewRR("example.com. 3600 IN NS ns1.example.com.")
+	assert.NoError(t, err)
+	ns2RR, err := dns.NewRR("example.com. 3600 IN NS ns2.example.com.")
+	assert.NoError(t, err)
+	ns1aRR, err := dns.NewRR("ns1.example.com. 3600 IN A 1.1.1.1")
+	assert.NoError(t, err)
+	ns2aRR, err := dns.NewRR("ns2.example.com. 3600 IN A 2.2.2.2")
+	assert.NoError(t, err)
+
+	_, err = p.AddZoneRecord("example.com.", ns1RR)
+	assert.NoError(t, err)
+	_, err = p.AddZoneRecord("example.com.", ns2RR)
+	assert.NoError(t, err)
+	_, err = p.AddZoneRecord("example.com.", ns1aRR)
+	assert.NoError(t, err)
+	_, err = p.AddZoneRecord("example.com.", ns2aRR)
+	assert.NoError(t, err)
+
+	w := &completeMockResponseWriter{}
+	req := &dns.Msg{}
+	req.SetQuestion("example.com.", dns.TypeNS)
+	ctx := &plugins.PluginContext{ResponseWriter: w}
+
+	// Execute the plugin logic
+	err = p.Execute(ctx, req)
+	assert.NoError(t, err)
+
+	// --- Verification ---
+	assert.True(t, ctx.Stop, "Handler should have stopped the chain")
+	assert.Equal(t, 1, len(w.writtenMsgs), "Expected exactly one message to be written")
+	res := w.writtenMsgs[0]
+
+	assert.Equal(t, dns.RcodeSuccess, res.Rcode, "Rcode should be NOERROR")
+	assert.Equal(t, 2, len(res.Answer), "Answer section should contain 2 NS records")
+	assert.Equal(t, 2, len(res.Ns), "Authority section should contain 2 NS records")
+	assert.Equal(t, 2, len(res.Extra), "Extra section should contain 2 glue A records")
+
+	// Check Answer section
+	var ns1Found, ns2Found bool
+	for _, rr := range res.Answer {
+		if ns, ok := rr.(*dns.NS); ok {
+			if ns.Ns == "ns1.example.com." {
+				ns1Found = true
+			}
+			if ns.Ns == "ns2.example.com." {
+				ns2Found = true
+			}
+		}
+	}
+	assert.True(t, ns1Found, "ns1.example.com. not found in Answer section")
+	assert.True(t, ns2Found, "ns2.example.com. not found in Answer section")
+
+	// Check Extra section
+	var a1Found, a2Found bool
+	for _, rr := range res.Extra {
+		if a, ok := rr.(*dns.A); ok {
+			if a.Hdr.Name == "ns1.example.com." && a.A.Equal(net.ParseIP("1.1.1.1")) {
+				a1Found = true
+			}
+			if a.Hdr.Name == "ns2.example.com." && a.A.Equal(net.ParseIP("2.2.2.2")) {
+				a2Found = true
+			}
+		}
+	}
+	assert.True(t, a1Found, "Glue record for ns1.example.com. not found in Extra section")
+	assert.True(t, a2Found, "Glue record for ns2.example.com. not found in Extra section")
+}
+
 func TestMXRecordResponse(t *testing.T) {
 	p := New("") // In-memory
 	p.AddZone("example.com.")
