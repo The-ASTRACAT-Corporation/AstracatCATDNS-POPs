@@ -45,7 +45,7 @@ type Zone struct {
 	// index: owner name -> type(uint16) -> []Record
 	records map[string]map[uint16][]Record
 	// keep list of NS records for authority
-	nsRecords []dns.RR
+	nsRecords []Record
 	// soa record if present
 	soa dns.RR
 
@@ -152,7 +152,7 @@ func (p *AuthoritativePlugin) loadFromFile() error {
 			case *dns.SOA:
 				z.soa = v
 			case *dns.NS:
-				z.nsRecords = append(z.nsRecords, v)
+				z.nsRecords = append(z.nsRecords, Record{ID: rd.ID, RR: v})
 			}
 		}
 		p.zones[z.Name] = z
@@ -269,8 +269,8 @@ func (p *AuthoritativePlugin) Execute(ctx *plugins.PluginContext, msg *dns.Msg) 
 		// in the main `records` map. The `nsRecords` slice is the authoritative source.
 		if q.Qtype == dns.TypeNS && strings.EqualFold(q.Name, zone.Name) {
 			zone.mu.RLock()
-			for _, rr := range zone.nsRecords {
-				res.Answer = append(res.Answer, dns.Copy(rr))
+			for _, rec := range zone.nsRecords {
+				res.Answer = append(res.Answer, dns.Copy(rec.RR))
 			}
 			zone.mu.RUnlock()
 
@@ -404,10 +404,10 @@ func (p *AuthoritativePlugin) addAuthorityAndGlue(res *dns.Msg, z *Zone) {
 	z.mu.RLock()
 	defer z.mu.RUnlock()
 	if len(z.nsRecords) > 0 {
-		for _, rr := range z.nsRecords {
-			res.Ns = append(res.Ns, rr)
+		for _, rec := range z.nsRecords {
+			res.Ns = append(res.Ns, rec.RR)
 			// add glue if the NS is in-zone and we have A/AAAA
-			if ns, ok := rr.(*dns.NS); ok {
+			if ns, ok := rec.RR.(*dns.NS); ok {
 				owner := dns.Fqdn(strings.ToLower(ns.Ns))
 				if recs, found := z.records[owner]; found {
 					// add A and AAAA
@@ -458,8 +458,8 @@ func (p *AuthoritativePlugin) addSOAAuthority(res *dns.Msg, z *Zone) {
 	if z.soa != nil {
 		res.Ns = append(res.Ns, z.soa)
 	} else if len(z.nsRecords) > 0 {
-		for _, rr := range z.nsRecords {
-			res.Ns = append(res.Ns, rr)
+		for _, rec := range z.nsRecords {
+			res.Ns = append(res.Ns, rec.RR)
 		}
 	}
 }
@@ -503,14 +503,15 @@ func (p *AuthoritativePlugin) LoadZone(zoneFile string) error {
 		p.nextRecordID++
 		p.mu.Unlock()
 
-		z.records[name][rr.Header().Rrtype] = append(z.records[name][rr.Header().Rrtype], Record{ID: id, RR: rr})
-
 		// collect soa and ns records separately
+		rec := Record{ID: id, RR: rr}
+		z.records[name][rr.Header().Rrtype] = append(z.records[name][rr.Header().Rrtype], rec)
+
 		switch v := rr.(type) {
 		case *dns.SOA:
 			z.soa = v
 		case *dns.NS:
-			z.nsRecords = append(z.nsRecords, v)
+			z.nsRecords = append(z.nsRecords, rec)
 		}
 	}
 
@@ -691,13 +692,14 @@ func (p *AuthoritativePlugin) AddZoneRecord(zoneName string, rr dns.RR) (int, er
 	if _, ok := z.records[name]; !ok {
 		z.records[name] = make(map[uint16][]Record)
 	}
-	z.records[name][rr.Header().Rrtype] = append(z.records[name][rr.Header().Rrtype], Record{ID: id, RR: rr})
+	rec := Record{ID: id, RR: rr}
+	z.records[name][rr.Header().Rrtype] = append(z.records[name][rr.Header().Rrtype], rec)
 
-	switch v := rr.(type) {
+	switch rr.(type) {
 	case *dns.SOA:
-		z.soa = v
+		z.soa = rr
 	case *dns.NS:
-		z.nsRecords = append(z.nsRecords, v)
+		z.nsRecords = append(z.nsRecords, rec)
 	}
 	z.mu.Unlock()
 
@@ -725,24 +727,21 @@ func (p *AuthoritativePlugin) UpdateZoneRecord(zoneName string, recordId int, ne
 		for t, arr := range typmap {
 			for i, r := range arr {
 				if r.ID == recordId {
-					oldRR := z.records[name][t][i].RR
 					z.records[name][t][i].RR = newRR
 					recordUpdated = true
 					// update special fields
-					switch v := newRR.(type) {
+					switch newRR.(type) {
 					case *dns.NS:
 						// remove old ns record
-						if oldNS, ok := oldRR.(*dns.NS); ok {
-							for j, ns := range z.nsRecords {
-								if ns.(*dns.NS).Ns == oldNS.Ns {
-									z.nsRecords = append(z.nsRecords[:j], z.nsRecords[j+1:]...)
-									break
-								}
+						for j, rec := range z.nsRecords {
+							if rec.ID == recordId {
+								z.nsRecords = append(z.nsRecords[:j], z.nsRecords[j+1:]...)
+								break
 							}
 						}
-						z.nsRecords = append(z.nsRecords, v)
+						z.nsRecords = append(z.nsRecords, Record{ID: recordId, RR: newRR})
 					case *dns.SOA:
-						z.soa = v
+						z.soa = newRR
 					}
 					break // break inner loop
 				}
@@ -783,9 +782,9 @@ func (p *AuthoritativePlugin) DeleteZoneRecord(zoneName string, recordId int) er
 			for i, r := range arr {
 				if r.ID == recordId {
 					// If it's an NS record, remove it from the special slice too
-					if nsRecord, ok := r.RR.(*dns.NS); ok {
-						for j, ns := range z.nsRecords {
-							if ns.(*dns.NS).Ns == nsRecord.Ns {
+					if _, ok := r.RR.(*dns.NS); ok {
+						for j, rec := range z.nsRecords {
+							if rec.ID == recordId {
 								z.nsRecords = append(z.nsRecords[:j], z.nsRecords[j+1:]...)
 								break
 							}
@@ -847,7 +846,7 @@ func (p *AuthoritativePlugin) UpdateZone(oldZoneName, newZoneName string) error 
 		}
 	}
 	for i := range z.nsRecords {
-		if ns, ok := z.nsRecords[i].(*dns.NS); ok {
+		if ns, ok := z.nsRecords[i].RR.(*dns.NS); ok {
 			ns.Hdr.Name = newZn
 		}
 	}
@@ -896,7 +895,7 @@ func (p *AuthoritativePlugin) ReplaceAllZones(zoneDTOs []ZoneDTO) error {
 			case *dns.SOA:
 				z.soa = v
 			case *dns.NS:
-				z.nsRecords = append(z.nsRecords, v)
+				z.nsRecords = append(z.nsRecords, Record{ID: rd.ID, RR: v})
 			}
 		}
 		newZones[z.Name] = z
@@ -925,8 +924,8 @@ func (p *AuthoritativePlugin) NotifyZoneSlaves(zoneName string) error {
 	zone.mu.RLock()
 	soa, haveSOA := zone.soa.(*dns.SOA)
 	nsRecords := make([]*dns.NS, 0, len(zone.nsRecords))
-	for _, rr := range zone.nsRecords {
-		if ns, ok := rr.(*dns.NS); ok {
+	for _, rec := range zone.nsRecords {
+		if ns, ok := rec.RR.(*dns.NS); ok {
 			nsRecords = append(nsRecords, ns)
 		}
 	}
