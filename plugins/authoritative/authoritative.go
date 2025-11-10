@@ -215,26 +215,6 @@ func (p *AuthoritativePlugin) Execute(ctx *plugins.PluginContext, msg *dns.Msg) 
 	res.Authoritative = true
 	res.RecursionAvailable = false
 
-	// Special handling for NS query at zone apex.
-	// This ensures that if NS records exist for the zone, they are returned
-	// in the Answer section, rather than treating it as a NODATA response.
-	if q.Qtype == dns.TypeNS && strings.EqualFold(q.Name, zone.Name) {
-		zone.mu.RLock()
-		// We use the separate nsRecords slice which is the definitive source for zone NS records.
-		for _, rr := range zone.nsRecords {
-			res.Answer = append(res.Answer, dns.Copy(rr))
-		}
-		zone.mu.RUnlock()
-
-		if len(res.Answer) > 0 {
-			p.addAuthorityAndGlue(res, zone)
-			ctx.ResponseWriter.WriteMsg(res)
-			ctx.Stop = true
-			return nil
-		}
-		// If no NS records are found, we fall through to the standard lookup logic.
-	}
-
 	// lookup
 	name := dns.Fqdn(strings.ToLower(q.Name))
 	zone.mu.RLock()
@@ -283,6 +263,26 @@ func (p *AuthoritativePlugin) Execute(ctx *plugins.PluginContext, msg *dns.Msg) 
 			return nil
 		}
 		// Name exists but no records of requested type => NODATA (NOERROR)
+
+		// Before finalizing a NODATA response, check if this was an NS query for the zone apex.
+		// The standard lookup might miss this if NS records are not also stored under the zone's apex name
+		// in the main `records` map. The `nsRecords` slice is the authoritative source.
+		if q.Qtype == dns.TypeNS && strings.EqualFold(q.Name, zone.Name) {
+			zone.mu.RLock()
+			for _, rr := range zone.nsRecords {
+				res.Answer = append(res.Answer, dns.Copy(rr))
+			}
+			zone.mu.RUnlock()
+
+			// If we found NS records, it's not a NODATA response anymore.
+			if len(res.Answer) > 0 {
+				p.addAuthorityAndGlue(res, zone)
+				ctx.ResponseWriter.WriteMsg(res)
+				ctx.Stop = true
+				return nil
+			}
+		}
+
 		res.Rcode = dns.RcodeSuccess
 		p.addSOAAuthority(res, zone)
 		ctx.ResponseWriter.WriteMsg(res)
