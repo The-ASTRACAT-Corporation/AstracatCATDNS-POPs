@@ -15,7 +15,7 @@ func newTestCache(t *testing.T) (*Cache, func()) {
 	t.Helper()
 
 	m := metrics.NewMetrics()
-	cache, err := NewCache(128, m)
+	cache, err := NewCache(128, 0, 3600*time.Second, m)
 	assert.NoError(t, err)
 
 	cleanup := func() {

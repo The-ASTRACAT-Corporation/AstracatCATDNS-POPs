@@ -40,7 +40,7 @@ func main() {
 	m := metrics.NewMetrics()
 
 	// Create cache and resolver
-	c, err := cache.NewCache(cfg.CacheSize, m)
+	c, err := cache.NewCache(cfg.CacheSize, cfg.CacheMinTTL, cfg.CacheMaxTTL, m)
 	if err != nil {
 		log.Fatalf("Failed to create cache: %v", err)
 	}

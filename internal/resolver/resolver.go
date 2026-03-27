@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"log"
+	"os"
+	"os/exec"
 	"time"
 
 	"dns-resolver/internal/cache"
@@ -28,12 +30,31 @@ type Resolver struct {
 // NewUnboundResolver creates a new Unbound resolver instance.
 func NewUnboundResolver(cfg *config.Config, c *cache.Cache, m *metrics.Metrics) *Resolver {
 	u := unbound.New()
-	// It's recommended to configure a trust anchor for DNSSEC validation.
-	// This could be from a file, or you can use the built-in one.
-	// For simplicity, we'll try to load a standard root key file.
-	if err := u.AddTaFile("/etc/unbound/root.key"); err != nil {
+
+	// Ensure the root trust anchor exists and is up to date.
+	rootKeyPath := "/etc/unbound/root.key"
+	if _, err := os.Stat(rootKeyPath); os.IsNotExist(err) {
+		log.Printf("Root trust anchor not found at %s, attempting to generate it...", rootKeyPath)
+		cmd := exec.Command("unbound-anchor", "-a", rootKeyPath)
+		if err := cmd.Run(); err != nil {
+			log.Printf("Warning: failed to run unbound-anchor: %v", err)
+		}
+	}
+
+	if err := u.AddTaFile(rootKeyPath); err != nil {
 		log.Printf("Warning: could not load root trust anchor: %v. DNSSEC validation might not be secure.", err)
 	}
+
+	// Configure Unbound options
+	u.SetOption("do-ip4:", "yes")
+	u.SetOption("do-ip6:", "yes")
+	u.SetOption("do-udp:", "yes")
+	u.SetOption("do-tcp:", "yes")
+	u.SetOption("harden-glue:", "yes")
+	u.SetOption("harden-dnssec-stripped:", "yes")
+	u.SetOption("use-caps-for-id:", "yes")
+	u.SetOption("prefetch:", "yes")
+	u.SetOption("qname-minimisation:", "yes")
 
 	r := &Resolver{
 		config:     cfg,
