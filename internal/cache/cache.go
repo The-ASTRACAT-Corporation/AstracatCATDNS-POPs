@@ -27,10 +27,12 @@ type Cache struct {
 	resolver interfaces.CacheResolver
 	metrics  *metrics.Metrics
 	msgPool  sync.Pool
+	minTTL   time.Duration
+	maxTTL   time.Duration
 }
 
 // NewCache creates and returns a new Cache with Ristretto.
-func NewCache(size int, m *metrics.Metrics) (*Cache, error) {
+func NewCache(size int, minTTL, maxTTL time.Duration, m *metrics.Metrics) (*Cache, error) {
 	if size <= 0 {
 		size = DefaultCacheSize
 	}
@@ -64,6 +66,8 @@ func NewCache(size int, m *metrics.Metrics) (*Cache, error) {
 				return new(dns.Msg)
 			},
 		},
+		minTTL: minTTL,
+		maxTTL: maxTTL,
 	}
 
 	return c, nil
@@ -113,8 +117,15 @@ func (c *Cache) Set(key string, msg *dns.Msg, swr time.Duration) {
 		return
 	}
 
-	ttl := getMinTTL(msg)
-	expiration := time.Now().Add(time.Duration(ttl) * time.Second)
+	ttl := time.Duration(getMinTTL(msg)) * time.Second
+	if ttl < c.minTTL {
+		ttl = c.minTTL
+	}
+	if ttl > c.maxTTL {
+		ttl = c.maxTTL
+	}
+
+	expiration := time.Now().Add(ttl)
 
 	item := &CacheItem{
 		Msg:                  msg.Copy(), // Store a copy to avoid race conditions
@@ -124,7 +135,7 @@ func (c *Cache) Set(key string, msg *dns.Msg, swr time.Duration) {
 
 	// The cost is 1, as we are not sizing items individually for this cache.
 	// The TTL for Ristretto should be the total lifetime of the item.
-	totalTTL := time.Duration(ttl)*time.Second + swr
+	totalTTL := ttl + swr
 	c.cache.SetWithTTL(key, item, 1, totalTTL)
 }
 

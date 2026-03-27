@@ -15,7 +15,7 @@ func TestResolver_Resolve(t *testing.T) {
 	// Create a new cache and resolver for the test.
 	cfg := config.NewConfig()
 	m := metrics.NewMetrics()
-	c, err := cache.NewCache(cache.DefaultCacheSize, m)
+	c, err := cache.NewCache(cache.DefaultCacheSize, cfg.CacheMinTTL, cfg.CacheMaxTTL, m)
 	if err != nil {
 		t.Fatalf("Failed to create cache: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestResolver_Resolve_DNSSEC(t *testing.T) {
 	// Use a longer timeout for DNSSEC queries as they can be slower.
 	cfg.RequestTimeout = 20 * time.Second
 	m := metrics.NewMetrics()
-	c, err := cache.NewCache(cache.DefaultCacheSize, m)
+	c, err := cache.NewCache(cache.DefaultCacheSize, cfg.CacheMinTTL, cfg.CacheMaxTTL, m)
 	if err != nil {
 		t.Fatalf("Failed to create cache: %v", err)
 	}

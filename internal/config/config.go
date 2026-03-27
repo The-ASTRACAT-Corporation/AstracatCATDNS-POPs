@@ -26,6 +26,10 @@ type Config struct {
 	ServerRole           string // "master", "slave", or "standalone"
 	MasterAPIEndpoint    string
 	SyncInterval         time.Duration
+	DoTAddr              string
+	DoHAddr              string
+	CertFile             string
+	KeyFile              string
 }
 
 // NewConfig loads the configuration from config.json or returns a default config.
@@ -52,6 +56,10 @@ func NewConfig() *Config {
 			ServerRole:           "master",
 			MasterAPIEndpoint:    "http://localhost:8080/api/v1/zones",
 			SyncInterval:         1 * time.Minute,
+			DoTAddr:              "0.0.0.0:853",
+			DoHAddr:              "0.0.0.0:443",
+			CertFile:             "cert.pem",
+			KeyFile:              "key.pem",
 		}
 		defaultCfg.Save("config.json")
 		return defaultCfg
